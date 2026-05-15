@@ -588,183 +588,28 @@ def simulate_with_warmup(warmup, theta_batch, param_names,
     return [bold[:, :, i] for i in range(B)]
 
 
-def compute_fc(ts):
-    """Pearson FC of a (T, N) timeseries."""
-    fc = np.corrcoef(ts.T)
-    fc = np.nan_to_num(fc, nan=0.0)
-    np.fill_diagonal(fc, 0.0)
-    return fc
-
-
-def fc_to_upper_tri(fc, nan_mask=None):
-    """Convert FC matrix to its upper-triangle vector.
-
-    Returns raw Pearson r values in [-1, 1]. z-scoring is the job of
-    the inference-stage FamilyScaler.
-    """
-    n = fc.shape[0]
-    iu = np.triu_indices(n, k=1)
-    if nan_mask is None:
-        nan_mask = getattr(config, "NAN_MASK", None)
-    if nan_mask is not None and nan_mask.shape == fc.shape:
-        valid = ~nan_mask[iu]
-        vec = fc[iu[0][valid], iu[1][valid]]
-    else:
-        vec = fc[iu]
-    return vec.astype(np.float32)
-
-
-def compute_sim_fcd_matrix(bold, window_tr=None, stride_tr=None):
-    """Simulated BOLD -> FCD-like (N, N) matrix.
-
-    Defined as the element-wise standard deviation across sliding-window
-    FCs. Captures dynamic variability and is distinct from the static FC.
-    """
-    window_tr = window_tr or config.FCD_WINDOW_TR
-    stride_tr = stride_tr or config.FCD_STRIDE_TR
-    t_len, n_nodes = bold.shape
-
-    if t_len < window_tr + stride_tr:
-        return np.zeros((n_nodes, n_nodes), dtype=np.float32)
-
-    starts = np.arange(0, t_len - window_tr + 1, stride_tr)
-    fcs = []
-    for s in starts:
-        seg = bold[s:s + window_tr]
-        if seg.std() < 1e-8:
-            fcs.append(np.zeros((n_nodes, n_nodes), dtype=np.float32))
-            continue
-        fc_seg = np.corrcoef(seg.T)
-        fcs.append(np.nan_to_num(fc_seg, nan=0.0).astype(np.float32))
-
-    fcs = np.stack(fcs)
-    fcd_matrix = fcs.std(axis=0)
-    fcd_matrix = (fcd_matrix + fcd_matrix.T) / 2
-    np.fill_diagonal(fcd_matrix, 0.0)
-    return fcd_matrix.astype(np.float32)
-
-
-def fcd_to_upper_tri(fcd_matrix, nan_mask=None):
-    """Convert FCD matrix (N, N) to its upper-triangle vector."""
-    n = fcd_matrix.shape[0]
-    iu = np.triu_indices(n, k=1)
-    if nan_mask is None:
-        nan_mask = getattr(config, "NAN_MASK", None)
-    if nan_mask is not None and nan_mask.shape == fcd_matrix.shape:
-        valid = ~nan_mask[iu]
-        vec = fcd_matrix[iu[0][valid], iu[1][valid]]
-    else:
-        vec = fcd_matrix[iu]
-    return vec.astype(np.float32)
-
-
-def fcd_to_summary_stats(fcd_matrix, nan_mask=None):
-    """FCD matrix (N, N) -> summary statistics vector (5,).
-
-    Returns [mean, std, q25, q50, q75] of the upper-triangle values.
-    Much lower dimensional than full upper-tri (5 vs 6555) and avoids
-    the poor PCA explained-variance caused by raw FCD spread.
-    """
-    vec = fcd_to_upper_tri(fcd_matrix, nan_mask=nan_mask)
-    return np.array([
-        vec.mean(),
-        vec.std(),
-        float(np.percentile(vec, 25)),
-        float(np.percentile(vec, 50)),
-        float(np.percentile(vec, 75)),
-    ], dtype=np.float32)
-
-
 # ---------------------------------------------------------------------------
-# Combined feature extraction
+# Compatibility wrappers — feature functions moved to ``features/``
+# (Phase 1 of repository refactor.)
+#
+# Existing imports like::
+#     from simulator import compute_fc, fc_to_upper_tri
+#     from simulator import extract_features, worker_extract
+# continue to work via these re-exports. New code should import directly
+# from the ``features`` package.
 # ---------------------------------------------------------------------------
-
-def extract_features(bold):
-    """Simulated BOLD (T, N) -> (fc_vec, fcd_stats).
-
-    fc_vec   : Pearson r upper triangle in [-1, 1]  (FC_DIM,)
-    fcd_stats: summary statistics       (5,)  [mean, std, q25, q50, q75]
-    """
-    fc = compute_fc(bold)
-    fc_vec = fc_to_upper_tri(fc)
-    if config.USE_FCD:
-        fcd_mat = compute_sim_fcd_matrix(bold)
-        fcd_vec = fcd_to_summary_stats(fcd_mat)
-    else:
-        fcd_vec = np.zeros(5, dtype=np.float32)
-    return fc_vec, fcd_vec
-
-
-def extract_observed_features(subject_data):
-    """Observed data -> (fc_vec, fcd_stats).
-
-    Respects ``config.FEATURE_SET``:
-
-    "fc_only" : returns (fc_upper_tri, np.zeros(0)). fcd is ignored.
-    "fc_fcd"  : returns (fc_upper_tri, fcd_summary). Requires either
-                a precomputed fcd matrix OR an empirical BOLD time
-                series in `subject_data["bold"]`.
-    """
-    feature_set = getattr(config, "FEATURE_SET", "fc_only")
-    fc = subject_data["fc"]
-    fc_vec = fc_to_upper_tri(fc)
-
-    if feature_set == "fc_only" or not getattr(config, "USE_FCD", False):
-        return fc_vec, np.zeros(0, dtype=np.float32)
-
-    # FCD branch (fc_fcd mode)
-    if "fcd" in subject_data and subject_data["fcd"] is not None:
-        fcd = subject_data["fcd"]
-        if fcd.ndim == 2:
-            fcd_vec = fcd_to_summary_stats(fcd)
-        else:
-            fcd_vec = np.array([
-                fcd.mean(), fcd.std(),
-                float(np.percentile(fcd, 25)),
-                float(np.percentile(fcd, 50)),
-                float(np.percentile(fcd, 75)),
-            ], dtype=np.float32)
-        return fc_vec, fcd_vec
-
-    if "bold" in subject_data and subject_data["bold"] is not None:
-        # Compute simulated-style FCD summary from empirical BOLD
-        bold = subject_data["bold"]
-        fcd_mat = compute_sim_fcd_matrix(bold)
-        fcd_vec = fcd_to_summary_stats(fcd_mat)
-        return fc_vec, fcd_vec
-
-    raise ValueError(
-        "FEATURE_SET='fc_fcd' requires either subject_data['fcd'] or "
-        "an empirical BOLD time series. Switch FEATURE_SET to 'fc_only' "
-        "or provide BOLD data."
-    )
-
-
-def extract_simulated_features(bold):
-    """Simulated BOLD -> (fc_vec, fcd_stats).
-
-    Uses the same pipeline as extract_observed_features so simulated
-    and observed features live in the same space.
-    """
-    feature_set = getattr(config, "FEATURE_SET", "fc_only")
-    fc = compute_fc(bold)
-    fc_vec = fc_to_upper_tri(fc)
-
-    if feature_set == "fc_only" or not getattr(config, "USE_FCD", False):
-        return fc_vec, np.zeros(0, dtype=np.float32)
-
-    fcd_mat = compute_sim_fcd_matrix(bold)
-    fcd_vec = fcd_to_summary_stats(fcd_mat)
-    return fc_vec, fcd_vec
-
-
-# ---------------------------------------------------------------------------
-# Parallel worker
-# ---------------------------------------------------------------------------
-
-def worker_extract(bold):
-    """Wrapper for ProcessPoolExecutor; returns None on failure."""
-    try:
-        return extract_features(bold)
-    except Exception:
-        return None
+from features.fc import (                # noqa: E402, F401
+    compute_fc,
+    fc_to_upper_tri,
+)
+from features.fcd import (               # noqa: E402, F401
+    compute_sim_fcd_matrix,
+    fcd_to_summary_stats,
+    fcd_to_upper_tri,
+)
+from features.extraction import (        # noqa: E402, F401
+    extract_features,
+    extract_observed_features,
+    extract_simulated_features,
+    worker_extract,
+)
