@@ -1,0 +1,27 @@
+# Mouse MPTP VBI-SBI pipeline — Python dependencies
+# Tested on Python 3.10, CUDA 12.x, H100 NVL
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Then install cupy and vbi separately (see install.sh or the notes below):
+#   pip install cupy-cuda12x
+#   pip install vbi
+
+# ---- Core scientific stack ----
+numpy>=1.26,<3.0
+scipy>=1.11
+pandas>=2.0
+matplotlib>=3.7
+
+# ---- ML / SBI ----
+torch>=2.1
+scikit-learn>=1.3
+sbi==0.26.1
+
+# ---- VBI Wilson-Cowan backend ----
+vbi==0.4.3
+
+# ---- GPU array library (uncomment one) ----
+# cupy-cuda12x>=13.0
+# cupy-cuda11x>=13.0
