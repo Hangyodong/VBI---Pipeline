@@ -1,105 +1,26 @@
-# =============================================================================
-# Python
-# =============================================================================
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg
-*.egg-info/
-build/
-dist/
-.eggs/
-pip-wheel-metadata/
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.hypothesis/
-
-# =============================================================================
-# Virtual environments
-# =============================================================================
-.venv/
-venv/
-env/
-ENV/
-.python-version
-
-# =============================================================================
-# Editors / IDEs
-# =============================================================================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# =============================================================================
-# Jupyter
-# =============================================================================
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-# Keep main.ipynb tracked, but ignore exploratory notebooks
-notebooks/scratch/
-*_scratch.ipynb
-
-# =============================================================================
-# Pipeline outputs — these can be regenerated from data + code
-# =============================================================================
-output_mouse_mptp/
-output/
-outputs/
-runs/
-results/
-checkpoints/
-artifacts/
-features_*.npz
-pipeline_artifacts.pkl
-*.png
-*.svg
-*.pdf
-
-# Allow plots that are intentionally committed (figures/ directory)
-!figures/*.png
-!figures/*.svg
-!figures/*.pdf
-
-# =============================================================================
-# Big binary input data (track via DVC / external storage, not git)
-# =============================================================================
+# 데이터
 *.mat
-*.nii
-*.nii.gz
-*.tsv
-data/
-raw/
+*.csv
+cache/
+output_mouse_mptp/
+optimized_params/
+dbs_analysis/
 
-# Allow small example / test data
-!tests/data/*.mat
-!tests/data/*.tsv
+# 노트북 체크포인트
+.ipynb_checkpoints/
 
-# =============================================================================
-# Logs & PBS job artifacts
-# =============================================================================
+# 백업
+*.bak*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 패치 스크립트 (임시)
+patch_*.py
+apply_patch.py
+
+# 로그
 *.log
-*.out
-*.err
-slurm-*.out
-pbs-*.out
-job_*.o*
-job_*.e*
-
-# =============================================================================
-# OS / misc
-# =============================================================================
-*.tmp
-*.bak
-*.orig
-.cache/
-core.*
+.env
