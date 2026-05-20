@@ -275,7 +275,7 @@ def get_subject_data(sid, fc_mat, sc_mat, fc_ids, sc_ids,
     delays      : (N, N) delay (ms) = lengths/velocity
     bold        : (T, N) optional ROI BOLD time series
     """
-    from simulator import compute_delay_matrix
+    from simulation.delays import compute_delay_matrix
 
     fc, fcd, fc_nan = _load_fc_fcd(fc_mat, fc_ids, sid)
 

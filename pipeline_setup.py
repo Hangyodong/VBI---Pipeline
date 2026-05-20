@@ -96,11 +96,15 @@ class PipelineConfig:
     PCA_DIM_FCD: int = 100
     EMBED_DIM: int = 64
     EMBED_HIDDEN: int = 256
+    USE_EMBEDDING: bool = False
 
     # ── SBI ──
+    SBI_DEVICE: str = "cuda"
     N_POSTERIOR: int = 2000
     N_SBC: int = 200
     N_TEST_RESIM: int = 50
+    NDE_HIDDEN: int = 128
+    NDE_TRANSFORMS: int = 8
 
     @property
     def ANALYSIS_BOLD_T(self) -> int:
@@ -181,11 +185,15 @@ def _apply_to_config(cfg: PipelineConfig):
     config.USE_FCD = cfg.USE_FCD
     config.EMBED_DIM = cfg.EMBED_DIM
     config.EMBED_HIDDEN = cfg.EMBED_HIDDEN
+    config.USE_EMBEDDING = cfg.USE_EMBEDDING
 
     # SBI
+    config.SBI_DEVICE = cfg.SBI_DEVICE
     config.N_POSTERIOR = cfg.N_POSTERIOR
     config.N_SBC = cfg.N_SBC
     config.N_TEST_RESIM = cfg.N_TEST_RESIM
+    config.NDE_HIDDEN = cfg.NDE_HIDDEN
+    config.NDE_TRANSFORMS = cfg.NDE_TRANSFORMS
 
 
 # ---------------------------------------------------------------------------

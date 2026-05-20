@@ -487,6 +487,34 @@ def test_observed_fcd_direct():
     print("  Observed FCD <- fc_mat[i, FCD_COL] (no computation needed)")
 
 
+def test_patch_invariants():
+    """Structural-cleanup patch invariants (P-1, P-2)."""
+    import importlib
+    import inspect
+
+    pl = importlib.import_module("pipelines.stage1_stage2")
+    assert hasattr(pl, "evaluate"), (
+        "P-1 broken: pipelines.stage1_stage2 has no 'evaluate' name"
+    )
+    assert pl.evaluate.__name__ == "evaluation", (
+        f"P-1 broken: pl.evaluate.__name__ = {pl.evaluate.__name__!r} "
+        "(expected 'evaluation')"
+    )
+    print(f"  P-1 OK : pl.evaluate -> {pl.evaluate.__file__}")
+
+    import data_loader
+    src = inspect.getsource(data_loader.get_subject_data)
+    assert "from simulation.delays import compute_delay_matrix" in src, (
+        "P-2 broken: data_loader.get_subject_data does not import "
+        "compute_delay_matrix from simulation.delays"
+    )
+    assert "from simulator import compute_delay_matrix" not in src, (
+        "P-2 broken: legacy 'from simulator import compute_delay_matrix' "
+        "still present in data_loader.get_subject_data"
+    )
+    print("  P-2 OK : data_loader.get_subject_data uses simulation.delays")
+
+
 # ---------------------------------------------------------------------------
 # Mock inference flow
 # ---------------------------------------------------------------------------
@@ -619,6 +647,7 @@ def run_basic_tests(runner):
     """No GPU, no SBI required."""
     runner.run("config consistency", test_config_consistency)
     runner.run("imports", test_imports)
+    runner.run("patch invariants (P-1, P-2)", test_patch_invariants)
     runner.run("ParameterScaler", test_parameter_scaler)
     runner.run("Stage 2 ParameterScaler", test_stage2_param_scaler)
     runner.run("FamilyScaler", test_family_scaler)

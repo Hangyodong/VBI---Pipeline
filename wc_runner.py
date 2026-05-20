@@ -23,9 +23,6 @@ Critical invariants
    (cupy); E values are transferred to CPU at each interim step. This
    avoids cupy NVRTC compilation issues with mismatched CUDA headers.
 """
-import math
-import time
-
 import numpy as np
 
 import config
@@ -113,52 +110,10 @@ def _apply_engine(params):
 
 
 # ---------------------------------------------------------------------------
-# H100-targeted optimizations (OPT-1/OPT-3/OPT-5)
-# ---------------------------------------------------------------------------
-# OPT-5 watermark: keep cupy memory pool warm between chunks on a 94 GB H100
-# NVL — eager free_all_blocks() forces re-allocation each chunk.  Only trim
-# when the pool exceeds 80 GB total.
-_POOL_TRIM_WATERMARK_BYTES = 80 * 1024 ** 3
-
-
-def _trim_memory_pool(cp):
-    """OPT-5: free cupy pool blocks only when above the watermark."""
-    try:
-        pool = cp.get_default_memory_pool()
-        if pool.total_bytes() > _POOL_TRIM_WATERMARK_BYTES:
-            pool.free_all_blocks()
-    except Exception:
-        pass
-
-
-def _alloc_stride_buffers(cp, stride, nn, ns):
-    """OPT-1 + OPT-3: stride-sized GPU staging + pinned CPU host buffer.
-
-    Returns ``(gpu_buf, cpu_buf, pinned_handle)``. The handle MUST stay in
-    scope for the lifetime of ``cpu_buf`` or the pinned host pages may be
-    reclaimed. Falls back to an unpinned numpy buffer if pinned allocation
-    is unavailable (the inner loop then still benefits from batched
-    transfers — only the DMA-bypass-cache speedup is lost).
-    """
-    gpu_buf = cp.empty((stride, nn, ns), dtype=cp.float32)
-    nbytes = int(stride) * int(nn) * int(ns) * np.dtype(np.float32).itemsize
-    try:
-        pinned = cp.cuda.alloc_pinned_memory(nbytes)
-        cpu_buf = np.frombuffer(pinned, dtype=np.float32).reshape(
-            stride, nn, ns
-        )
-        return gpu_buf, cpu_buf, pinned
-    except Exception:
-        cpu_buf = np.empty((stride, nn, ns), dtype=np.float32)
-        return gpu_buf, cpu_buf, None
-
-
-# ---------------------------------------------------------------------------
 # Streaming integration with TVB Bold Monitor
 # ---------------------------------------------------------------------------
 
-def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
-                       progress_fn=None):
+def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw):
     """Run VBI WC step-by-step with TVB Bold Monitor on CPU.
 
     Uses ``bold.BoldMonitor`` with ``xp=np`` so the HRF math stays on
@@ -205,51 +160,12 @@ def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
         hrf_length_ms=getattr(config, "HRF_LENGTH_MS", 20_000.0),
     )
 
-    # OPT-1 + OPT-3: stride-batched GPU staging + pinned host buffer.
-    # Cuts host-blocking PCIe syncs from `n_steps` (600 K) to
-    # `n_steps / stride` (~75 K) without changing the per-step E value
-    # that mon.step() sees — every BoldMonitor input is bit-identical to
-    # the per-step .get() implementation it replaces.
-    try:
-        import cupy as cp  # only available when running on GPU
-        stride = max(1, int(getattr(mon, "_interim_istep", 1)))
-        gpu_buf, cpu_buf, _pinned_handle = _alloc_stride_buffers(
-            cp, stride, nn, ns
-        )
-        use_gpu_buffer = True
-    except Exception:
-        # cupy unavailable (e.g. CPU-only test environment) — fall back to
-        # the original per-step transfer path.
-        use_gpu_buffer = False
-
-    if use_gpu_buffer:
-        i = 0
-        while i < n_steps:
-            burst = min(stride, n_steps - i)
-            for j in range(burst):
-                t_curr = (i + j) * dt_full
-                model.x0 = model.heunStochastic(model.x0, t_curr)
-                gpu_buf[j] = model.x0[:nn, :]
-            if burst == stride:
-                gpu_buf.get(out=cpu_buf)
-            else:
-                gpu_buf[:burst].get(out=cpu_buf[:burst])
-            for j in range(burst):
-                mon.step(i + j, cpu_buf[j], t_cut_ms=t_cut)
-            i += burst
-            if progress_fn is not None:
-                progress_fn(i, n_steps)
-    else:
-        for i in range(n_steps):
-            t_curr = i * dt_full
-            model.x0 = model.heunStochastic(model.x0, t_curr)
-            E_i = model.x0[:nn, :]
-            E_cpu = (
-                E_i.get() if hasattr(E_i, "get") else np.asarray(E_i)
-            )
-            mon.step(i, E_cpu, t_cut_ms=t_cut)
-            if progress_fn is not None and i % 1000 == 0:
-                progress_fn(i + 1, n_steps)
+    for i in range(n_steps):
+        t_curr = i * dt_full
+        model.x0 = model.heunStochastic(model.x0, t_curr)
+        E_i = model.x0[:nn, :]
+        E_cpu = E_i.get() if hasattr(E_i, "get") else np.asarray(E_i)
+        mon.step(i, E_cpu, t_cut_ms=t_cut)
 
     return mon.collect(mean_subtract=True)
 
@@ -307,8 +223,7 @@ def _try_per_sim_params(params, chunk, param_names):
 
 def simulate_gpu_batch(weights, theta_batch, param_names,
                        fixed_overrides=None, delays=None, apply_bw=True,
-                       _allow_fallback=True,
-                       label=None, n_total=None):
+                       _allow_fallback=True):
     """Simulate a batch of parameter sets on the GPU.
 
     Each row of ``theta_batch`` corresponds to one simulation
@@ -330,56 +245,12 @@ def simulate_gpu_batch(weights, theta_batch, param_names,
     n_total = len(theta_batch)
     outputs = []
     batch_sz = config.GPU_BATCH
-
-    # ── 진행 바 초기화 (label 지정 시 활성화) ────────────────────
-    import sys as _sys_pb, time as _time_pb
-    if n_total is None:
-        n_total = len(theta_batch)
-    _bar_width = 20
-    _lbl = str(label) if label is not None else ""
-    _t_start_pb = _time_pb.perf_counter()
-    _n_done = 0
-
-    def _fmt_t(s):
-        m = int(s) // 60
-        return f"{m:02d}:{int(s) % 60:02d}"
-
-    if label is not None:
-        _n_chunks_total = math.ceil(n_total / config.GPU_BATCH) if n_total > 0 else 1
-        print(
-            f"\n[Step 2] {_lbl}  N_SIM={n_total:,}  GPU_BATCH={config.GPU_BATCH:,}"
-            f"  n_chunks={_n_chunks_total}",
-            flush=True,
-        )
-
     dt_ms = config.DT * config.DECIMATE
 
     # Verify per-sim parameter support on the very first chunk.
     array_param_supported = None
 
-    # L3 — per-chunk progress accounting (Task A). Local helper so the
-    # success and fallback paths emit identical lines.
-    n_chunks = math.ceil(n_total / batch_sz) if n_total > 0 else 0
-
-    def _emit_chunk_log(idx, sz, t_start, pre):
-        elapsed = time.time() - t_start
-        valid = sum(int(np.isfinite(b).all()) for b in outputs[pre:])
-        running = len(outputs)
-        if sz > 0 and valid == 0:
-            print(
-                f"  WARN chunk {idx:>3d}/{n_chunks:<3d}  "
-                f"({sz:>4d} sims) ... all dropped  total {running:>6d}"
-            )
-        else:
-            print(
-                f"  chunk {idx:>3d}/{n_chunks:<3d}  "
-                f"({sz:>4d} sims) ...  {elapsed:5.2f} s  "
-                f"got {valid:>4d}  total {running:>6d}"
-            )
-
-    for chunk_i, start in enumerate(range(0, n_total, batch_sz), start=1):
-        chunk_start = time.time()
-        pre_count = len(outputs)
+    for start in range(0, n_total, batch_sz):
         end = min(start + batch_sz, n_total)
         chunk = np.asarray(theta_batch[start:end], dtype=np.float32)
         csz = len(chunk)
@@ -413,34 +284,8 @@ def simulate_gpu_batch(weights, theta_batch, param_names,
             model = wc_cls(params)
             model.prepare_input()
             model.set_initial_state()
-            if label is not None:
-                import sys as _sys_hrf, time as _time_hrf
-                _hrf_base = _n_done
-
-                def _pfn(steps_done, steps_total):
-                    _cp = steps_done / steps_total if steps_total else 0
-                    _est = _hrf_base + int(_cp * csz)
-                    _el = _time_hrf.perf_counter() - _t_start_pb
-                    _sp = _est / _el if _el > 1e-6 else 0.0
-                    _eta = (n_total - _est) / _sp if _sp > 1e-6 else 0.0
-                    _f = int(_bar_width * _est / n_total)
-                    _b = "▓" * _f + "░" * (_bar_width - _f)
-                    _sys_hrf.stdout.write(
-                        f"\r  {_lbl:<12s}"
-                        f" |{_b}|"
-                        f" ~{_est:>6,}/{n_total:>6,}"
-                        f" |{100.0*_est/n_total if n_total else 0:5.1f}%"
-                        f" |{_sp:5.1f} sim/s"
-                        f" | elapsed {int(_el)//60:02d}:{int(_el)%60:02d}"
-                        f" | ETA {int(_eta)//60:02d}:{int(_eta)%60:02d}"
-                        f"   "
-                    )
-                    _sys_hrf.stdout.flush()
-            else:
-                _pfn = None
             result = _run_streaming_hrf(
                 model, n_nodes, csz, dt_ms, apply_bw=apply_bw,
-                progress_fn=_pfn,
             )
             if array_param_supported is None:
                 array_param_supported = True
@@ -480,78 +325,19 @@ def simulate_gpu_batch(weights, theta_batch, param_names,
                         "--force-reinstall"
                     ) from e2
                 outputs.append(r_single[:, :, 0])
-                _n_done += 1
-                if label is not None and (
-                    _n_done % max(1, csz // 50) == 0 or _n_done >= n_total
-                ):
-                    _elapsed = _time_pb.perf_counter() - _t_start_pb
-                    _pct   = 100.0 * _n_done / n_total
-                    _speed = _n_done / _elapsed if _elapsed > 1e-6 else 0.0
-                    _eta   = (n_total - _n_done) / _speed if _speed > 1e-6 else 0.0
-                    _f     = int(_bar_width * _n_done / n_total)
-                    _b     = "▓" * _f + "░" * (_bar_width - _f)
-                    _line  = (
-                        f"\r  {_lbl:<12s}"
-                        f" |{_b}| (fallback)"
-                        f" {_n_done:>6,}/{n_total:>6,}"
-                        f" |{_pct:5.1f}%"
-                        f" |{_speed:5.1f} sim/s"
-                        f" | elapsed {_fmt_t(_elapsed)}"
-                        f"   "
-                    )
-                    _sys_pb.stdout.write(_line)
-                    _sys_pb.stdout.flush()
                 if (r + 1) % max(1, csz // 4) == 0 or r + 1 == csz:
                     print(f"    [fallback] {r + 1}/{csz} theta done")
-            # OPT-5: keep pool warm on H100; trim only above watermark.
-            _trim_memory_pool(cp)
-            _emit_chunk_log(chunk_i, csz, chunk_start, pre_count)
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:
+                pass
             continue
 
-        # Success path: split per-sim outputs + \r progress bar
-        _display_stride = max(1, min(512, csz // 50))
-        for _si in range(csz):
-            outputs.append(result[:, :, _si])
-            _n_done += 1
-            if label is not None and (
-                _n_done % _display_stride == 0 or _n_done >= n_total
-            ):
-                _elapsed = _time_pb.perf_counter() - _t_start_pb
-                _pct   = 100.0 * _n_done / n_total
-                _speed = _n_done / _elapsed if _elapsed > 1e-6 else 0.0
-                _eta   = (n_total - _n_done) / _speed if _speed > 1e-6 else 0.0
-                _f     = int(_bar_width * _n_done / n_total)
-                _b     = "▓" * _f + "░" * (_bar_width - _f)
-                _line  = (
-                    f"\r  {_lbl:<12s}"
-                    f" |{_b}|"
-                    f" {_n_done:>6,}/{n_total:>6,}"
-                    f" |{_pct:5.1f}%"
-                    f" |{_speed:5.1f} sim/s"
-                    f" | elapsed {_fmt_t(_elapsed)}"
-                    f" | ETA {_fmt_t(_eta)}"
-                    f"   "
-                )
-                _sys_pb.stdout.write(_line)
-                _sys_pb.stdout.flush()
+        # Success path: split per-sim outputs
+        for i in range(csz):
+            outputs.append(result[:, :, i])
 
-        # OPT-5: keep pool warm on H100; trim only above watermark.
-        _trim_memory_pool(cp)
-        _emit_chunk_log(chunk_i, csz, chunk_start, pre_count)
-
-    # ── 완료 요약 ─────────────────────────────────────────────────
-    if label is not None:
-        _total_t = _time_pb.perf_counter() - _t_start_pb
-        _spd = len(outputs) / _total_t if _total_t > 1e-6 else 0.0
-        print()
-        print(
-            f"  {_lbl} DONE"
-            f" | collected={len(outputs):,}/{n_total:,}"
-            f" | dropped={n_total - len(outputs):,}"
-            f" | {_spd:.1f} sim/s avg"
-            f" | elapsed {_fmt_t(_total_t)}",
-            flush=True,
-        )
+        cp.get_default_memory_pool().free_all_blocks()
 
     return outputs
 
@@ -590,6 +376,5 @@ def simulate_single(weights, params_dict, n_repeat=1, delays=None,
     # result shape: (T_bold, N, S)
     out = [result[:, :, i] for i in range(n_repeat)]
 
-    # OPT-5: keep pool warm on H100; trim only above watermark.
-    _trim_memory_pool(cp)
+    cp.get_default_memory_pool().free_all_blocks()
     return out

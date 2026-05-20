@@ -91,13 +91,13 @@ SEED = 42
 # ---------------------------------------------------------------------------
 
 ENGINE = "gpu"
-N_SIM = 7000                # Stage 1 simulations per subject
-N_SIM_S2 = 7000             # Stage 2 simulations per subject
-GPU_BATCH = 4000            # H100 NVL batch size
+N_SIM = 50_000              # Stage 1 simulations per subject (H100 94GB)
+N_SIM_S2 = 50_000           # Stage 2 simulations per subject
+GPU_BATCH = 50_000          # H100 94GB: 50k×115×float32 ≈ 6GB → 배치 1회
 
 DT = 0.5                    # integration step (ms)
-T_END = 300_000.0           # total simulation length (ms) - 5 minutes
-T_CUT = 60_000.0            # transient cut (ms) - 1 minute
+T_END = 300_000.0           # total simulation length (ms) - 300s (production)
+T_CUT =  60_000.0           # transient cut (ms) - 60s (production)
 DECIMATE = 2
 FS_NEURAL = 1000.0 / (DT * DECIMATE)
 
@@ -187,8 +187,8 @@ SBI_DEVICE = (
     "cuda" if (_TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu"
 )
 N_POSTERIOR = 2000
-NDE_HIDDEN = 64
-NDE_TRANSFORMS = 5
+NDE_HIDDEN     = 128         # 64 → 128
+NDE_TRANSFORMS = 8           # 5 → 8 (posterior 표현력↑)
 NDE_MODEL = "maf"
 USE_MIXED_PRECISION = True
 
@@ -197,10 +197,11 @@ USE_MIXED_PRECISION = True
 # Embedding
 # ---------------------------------------------------------------------------
 
-EMBED_DIM = 64
-EMBED_HIDDEN = 256
+EMBED_DIM    = 256           # 128 → 256
+EMBED_HIDDEN = 512           # 256 → 512 (H100 Tensor Core 활용)
+USE_EMBEDDING: bool = False  # False -> nn.Identity fallback in train_snpe
 
-PCA_DIM_FC = 200            # FC upper triangle -> 200 PCs
+PCA_DIM_FC = 2000           # FC upper triangle -> 2000 PCs (PCA 품질 개선)
 PCA_DIM_FCD = 100           # FCD upper triangle -> 100 PCs
 PCA_DIM = PCA_DIM_FC        # alias
 
@@ -301,7 +302,9 @@ def print_config():
     print(f"  Velocity        : {VELOCITY_M_PER_S} m/s")
     print(f"  Stage 1 params  : {STAGE1_PARAMS}")
     print(f"  N_SIM           : {N_SIM} per subject")
-    print(f"  GPU batch       : {GPU_BATCH}")
+    print(f"  GPU batch       : {GPU_BATCH}  (= N_SIM: 배치 1회)")
+    if T_END < 100_000:
+        print(f"  ⚠ DEBUG mode   : T_end={T_END/1000:.0f}s T_cut={T_CUT/1000:.0f}s (production: 300s/60s)")
     print(f"  PCA             : FC -> {PCA_DIM_FC}, FCD -> {PCA_DIM_FCD}")
     print(f"  Embedding       : MLP {EMBED_HIDDEN} -> {EMBED_DIM}")
     print(f"  Features        : FC={USE_FC} FCD={USE_FCD} PSD={USE_PSD}")

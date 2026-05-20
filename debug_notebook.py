@@ -90,7 +90,7 @@ def _check_a_imports(verbose=True):
 
     # VBI WC import
     try:
-        from vbi.models.cupy.wc import WC_sde   # noqa: F401
+        from vbi.models.cupy.wilson_cowan import WC_sde   # noqa: F401
         print(f"    VBI WC_sde: OK")
     except ImportError as e:
         print(f"    VBI WC_sde: NOT AVAILABLE ({e})")
@@ -287,7 +287,9 @@ def _check_g_mini(verbose=True):
 
     n_sim = 4
     scaler = inference.make_stage1_param_scaler()
-    prior_scaled = inference.make_scaled_prior(len(scaler.param_names))
+    prior_scaled = inference.make_scaled_prior(
+        len(scaler.param_names), device=config.SBI_DEVICE,
+    )
 
     theta_scaled, _, fc_raw, _ = inference.collect_training_data(
         subj1, subject_data, prior_scaled, scaler,
