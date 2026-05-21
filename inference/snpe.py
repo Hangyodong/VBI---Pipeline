@@ -41,7 +41,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
-               proposal=None, verbose=True, fc_raw=None):
+               proposal=None, verbose=True, fc_raw=None, sc_basis=None,
+               sc_matrix=None):
     """Train SNPE-C jointly with the embedding network.
 
     Works with sbi 0.22+ where ``posterior_nn`` moved from
@@ -81,15 +82,20 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
 
     if embedding_net is None:
         if config.USE_EMBEDDING:
-            embedding_net = FeatureEmbedding(input_dim=x_input.shape[1])
+            from inference.embedding import make_embedding_net
+            embedding_net = make_embedding_net(
+                config.EMBED_TYPE,
+                input_dim=x_input.shape[1],
+                out_dim=config.EMBED_DIM,
+                sc_matrix=sc_matrix,
+            )
             _n_params = sum(
                 p.numel() for p in embedding_net.parameters()
                 if p.requires_grad
             )
             _embed_desc = (
-                f"input={x_input.shape[1]}"
-                f" -> [{config.EMBED_HIDDEN}->ReLU->Drop,"
-                f" {config.EMBED_DIM}]"
+                f"type={config.EMBED_TYPE}  input={x_input.shape[1]}"
+                f" -> out={config.EMBED_DIM}"
             )
         else:
             import torch.nn as nn
@@ -157,6 +163,12 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
             f"                    device={config.SBI_DEVICE}  "
             f"(PCA frozen | MLP+MAF jointly trained)"
         )
+        if sc_basis is not None:
+            _sb = np.asarray(sc_basis)
+            print(
+                f"           sc_basis: shape={tuple(_sb.shape)}  "
+                f"dtype={_sb.dtype}"
+            )
 
     # Heartbeat: inferer.train() can run silently for many minutes.
     # Daemon thread prints a periodic alive-ping with the current epoch
@@ -404,13 +416,13 @@ def step7_fit_param_scaler(verbose=True):
 
 
 def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
-                     fc_raw=None):
+                     fc_raw=None, sc_basis=None, sc_matrix=None):
     """Step 8. Train single-round amortized SNPE-C."""
     t_step8 = time.time()
     posterior, embedding_net = train_snpe(
         theta_scaled, x_input, prior_scaled,
         embedding_net=None, proposal=None, verbose=verbose,
-        fc_raw=fc_raw,
+        fc_raw=fc_raw, sc_basis=sc_basis, sc_matrix=sc_matrix,
     )
     # E12 — Step 8 summary: total elapsed + posterior + embedding device.
     if verbose:
