@@ -34,7 +34,13 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 import config
-from inference._utils import _progress
+from inference._utils import _progress, _emit
+
+try:
+    from tqdm.auto import tqdm
+except Exception:  # tqdm not installed -> identity shim
+    def tqdm(it=None, *a, **k):
+        return it if it is not None else []
 
 
 # ---------------------------------------------------------------------------
@@ -67,12 +73,14 @@ def collect_training_data(subjects, subject_data, prior_scaled,
         from cuBNM.simulate import simulate_gpu_batch  # cuBNM WCVBI (drop-in)
     elif eng == "rwweib":
         from cuBNM.simulate_rwweib import simulate_gpu_batch  # cuBNM RWW-EIB-FFI
+    elif eng == "rww":
+        from cuBNM.simulate_rww import simulate_gpu_batch      # cuBNM stock rWW (Deco 2014)
     elif eng in ("vbi", "gpu"):
         from simulator import simulate_gpu_batch        # cupy VBI engine
     else:
         raise ValueError(
             f"unknown simulation engine {engine!r}; "
-            "expected 'cubnm', 'rwweib', 'vbi', or 'gpu'."
+            "expected 'cubnm', 'rwweib', 'rww', 'vbi', or 'gpu'."
         )
     if verbose:
         print(f"  [Step 2] simulation engine: {eng}")
@@ -111,8 +119,12 @@ def collect_training_data(subjects, subject_data, prior_scaled,
             f"{n_sim} = {n_subj * n_sim} sims"
         )
 
+    subj_bar = tqdm(
+        enumerate(subjects), total=n_subj, unit="subj",
+        desc="[Step 2] subjects", disable=not verbose,
+    )
     with ProcessPoolExecutor(max_workers=config.N_CPU) as executor:
-        for s_idx, sid in enumerate(subjects):
+        for s_idx, sid in subj_bar:
             batch_sz = config.GPU_BATCH
             n_batches = (n_sim + batch_sz - 1) // batch_sz
 
@@ -134,15 +146,18 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                 sc_sparsity = float((sc > 0).sum()) / sc.size
                 delay_max = float(dly.max()) if dly is not None else 0.0
                 n_chunks = math.ceil(n_sim / config.GPU_BATCH)
-                print(
-                    f"\n[Step 2] Subject {s_idx + 1}/{n_subj}  {sid}"
+                _emit(
+                    f"[Step 2] Subject {s_idx + 1}/{n_subj}  {sid}"
                     f"  N_SIM={n_sim:,}  GPU_BATCH={config.GPU_BATCH:,}"
-                    f"\n         sc_sparsity={sc_sparsity:.3f}"
-                    f"  delay_max={delay_max:.1f}ms  n_chunks={n_chunks}",
-                    flush=True,
+                    f"  sc_sparsity={sc_sparsity:.3f}"
+                    f"  delay_max={delay_max:.1f}ms  n_chunks={n_chunks}"
                 )
 
-            for b_idx in range(n_batches):
+            batch_bar = tqdm(
+                range(n_batches), unit="batch", leave=False,
+                desc=f"  {sid}", disable=(not verbose or n_batches <= 1),
+            )
+            for b_idx in batch_bar:
                 start = b_idx * batch_sz
                 end = min(start + batch_sz, n_sim)
                 chunk_r = theta_r[start:end]
@@ -156,7 +171,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                         label=str(sid), n_total=n_sim,
                     )
                 except Exception as e:
-                    print(f"  batch {b_idx} failed: {e}")
+                    _emit(f"  batch {b_idx} failed: {e}")
                     continue
 
                 if save_first_sample and _first_bold is None and bolds:
@@ -177,12 +192,18 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                     n_done = len(all_theta_s)
                     total = n_subj * n_sim
                     pct = n_done / max(total, 1) * 100
-                    _progress(
-                        f"batch {b_idx + 1}/{n_batches}  "
-                        f"sim {end}/{n_sim}  "
-                        f"total {n_done}/{total} ({pct:.1f}%)  "
-                        f"({elapsed:.1f}s)"
-                    )
+                    if n_batches > 1:
+                        batch_bar.set_postfix_str(
+                            f"sim {end}/{n_sim}  "
+                            f"total {n_done}/{total} ({pct:.1f}%)"
+                        )
+                    else:
+                        _progress(
+                            f"batch {b_idx + 1}/{n_batches}  "
+                            f"sim {end}/{n_sim}  "
+                            f"total {n_done}/{total} ({pct:.1f}%)  "
+                            f"({elapsed:.1f}s)"
+                        )
 
             for queued in future_queue:
                 _drain_one_future(
@@ -200,6 +221,10 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                     f"[Subject {s_idx + 1}/{n_subj}] done  "
                     f"{subj_n}/{n_sim} collected  "
                     f"fc=({subj_n},{fc_dim})  {elapsed:.2f} s"
+                )
+                subj_bar.set_postfix_str(
+                    f"collected {len(all_theta_s)}/{n_subj * n_sim}  "
+                    f"last {subj_n}/{n_sim}"
                 )
 
     theta_s = np.array(all_theta_s, dtype=np.float32)

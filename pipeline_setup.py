@@ -51,6 +51,7 @@ class PipelineConfig:
     BOLD_FILE: str = "MPTP_BOLD_115.mat"
 
     # ── Subject split ──
+    N_SUBJECTS: int = 100   # subject pool size (HCP: smallest ids first)
     N_TRAIN: int = 4
     N_VAL: int = 2
     N_TEST: int = 2
@@ -68,6 +69,7 @@ class PipelineConfig:
     # ── Time discretization ──
     DT: float = 0.5
     DECIMATE: int = 20
+    TR_SEC: float = 1.0          # BOLD sampling period (s); cuBNM downsamples to this
 
     # ── HRF (TVB MixtureOfGammas) ──
     # peak ~ HRF_A1/HRF_L seconds.  Mouse: ~3s  Human: ~6s
@@ -123,8 +125,8 @@ class PipelineConfig:
 
     @property
     def ANALYSIS_BOLD_T(self) -> int:
-        """Number of BOLD TRs after transient cut (TR = 1 s)."""
-        return int((self.T_END_MS - self.T_CUT_MS) / 1000)
+        """Number of BOLD TRs after transient cut (= analysis window / TR)."""
+        return int((self.T_END_MS - self.T_CUT_MS) / (self.TR_SEC * 1000.0))
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +169,7 @@ def _apply_to_config(cfg: PipelineConfig):
     config.BOLD_PATH = f"{cfg.DATA_DIR}/{cfg.BOLD_FILE}"
 
     # Split
+    config.N_SUBJECTS = cfg.N_SUBJECTS
     config.N_TRAIN = cfg.N_TRAIN
     config.N_VAL = cfg.N_VAL
     config.N_TEST = cfg.N_TEST
@@ -180,6 +183,11 @@ def _apply_to_config(cfg: PipelineConfig):
     config.ANALYSIS_BOLD_T = cfg.ANALYSIS_BOLD_T
     config.DT = cfg.DT
     config.DECIMATE = cfg.DECIMATE
+    config.TR_SEC = cfg.TR_SEC
+    config.FS_BOLD = 1.0 / cfg.TR_SEC
+    config.FS_NEURAL = 1000.0 / (cfg.DT * cfg.DECIMATE)
+    if hasattr(config, "BW"):
+        config.BW["TR"] = cfg.TR_SEC
     config.WC_FIXED["t_end"] = cfg.T_END_MS
     config.WC_FIXED["t_cut"] = cfg.T_CUT_MS
     config.WC_FIXED["dt"] = cfg.DT
@@ -245,10 +253,17 @@ def _apply_to_config(cfg: PipelineConfig):
 def _patch_print_flush():
     """Make builtins.print always flush, so Jupyter shows output live."""
     import builtins
+    import functools
     if getattr(builtins, "_print_patched_for_flush", False):
         return
     _orig_print = builtins.print
 
+    # functools.wraps copies __name__/__module__/__qualname__ from the real
+    # print, so libraries that introspect the global print by name (e.g.
+    # numba's `@infer_global(print)` -> getattr(print.__module__,
+    # print.__name__)) still resolve to builtins.print instead of looking up
+    # a non-existent `pipeline_setup._print_with_flush`.
+    @functools.wraps(_orig_print)
     def _print_with_flush(*args, **kwargs):
         kwargs.setdefault("flush", True)
         return _orig_print(*args, **kwargs)

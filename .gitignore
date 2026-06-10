@@ -27,3 +27,6 @@ apply_patch.py
 
 # SBI 로그
 sbi-logs/
+
+# HCP 런 산출물
+output_hcp/

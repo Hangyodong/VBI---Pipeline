@@ -80,6 +80,10 @@ N_VAL = 2
 N_TEST = 2
 SEED = 42
 
+# Size of the subject pool to use (HCP: smallest N_SUBJECTS subject-ids first).
+# train+val+test are drawn from this pool. Ignored by the MPTP group-filter path.
+N_SUBJECTS = 100
+
 
 # ---------------------------------------------------------------------------
 # Simulation
@@ -145,14 +149,16 @@ WC_FIXED = {
 # Inferred params (g_LRE, g_FFI, sigma) are taken from theta, not from here.
 # NOTE a_i = 615.0 (NOT 0.615); inhibitory current uses J_N * S_e.
 # ---------------------------------------------------------------------------
+# Fixed regional params for RWW-EIB-FFI (the rest — a_E/b_E/d/gamma/tau/w_E/w_I/
+# w_II/I_ext — are compile-time constants in cuBNM/rww_eib.yaml, not set here).
+# Inferred (g_LRE/g_FFI/sigma/I_o) come from theta, not from this dict.
 RWWEIB_FIXED = {
-    "J_N": 0.15, "J_i": 1.0, "w_p": 1.4,
-    "W_e": 1.0, "W_i": 0.7, "I_o": 0.382, "I_ext": 0.0,
-    "a_e": 310.0, "b_e": 125.0, "d_e": 0.16,
-    "gamma_e": 0.641 / 1000.0, "tau_e": 100.0,
-    "a_i": 615.0, "b_i": 177.0, "d_i": 0.087,
-    "gamma_i": 1.0 / 1000.0, "tau_i": 10.0,
+    "w_p": 1.4, "J_N": 0.15, "J_i": 1.0,
 }
+
+# Stock cuBNM rWW (Deco 2014). FIC auto-tunes wIE when on (then wIE not inferred).
+RWW_DO_FIC = True
+RWW_FIXED = {"wIE": 1.0}   # used only when RWW_DO_FIC is False
 
 VELOCITY_M_PER_S = 1.5
 
@@ -185,19 +191,31 @@ PRIOR_CEI_LOW, PRIOR_CEI_HIGH = 6.0, 18.0
 PRIOR_GLRE_LOW,  PRIOR_GLRE_HIGH  = 0.0, 3.0
 PRIOR_GFFI_LOW,  PRIOR_GFFI_HIGH  = 0.0, 3.0
 PRIOR_SIGMA_LOW, PRIOR_SIGMA_HIGH = 0.0, 0.03
+PRIOR_IO_LOW,    PRIOR_IO_HIGH    = 0.3, 0.45   # background current I_o (nom 0.382)
+
+# Stock rWW (Deco 2014) priors. wIE auto-tuned by FIC (not inferred).
+PRIOR_G_LOW,    PRIOR_G_HIGH    = 0.0, 7.0      # global coupling
+PRIOR_WP_LOW,   PRIOR_WP_HIGH   = 0.0, 2.0      # local excitatory recurrence
+PRIOR_JN_LOW,   PRIOR_JN_HIGH   = 0.001, 0.5    # NMDA coupling
+PRIOR_RWWSIG_LOW, PRIOR_RWWSIG_HIGH = 0.0, 0.05  # noise
 
 
 # ---------------------------------------------------------------------------
 # Stage 1 parameter prior  —  model selected by INFERENCE_MODEL
 # ---------------------------------------------------------------------------
 # "wc"     -> Wilson-Cowan (WCVBI, engine="cubnm"): P, Q, g_e, g_i, c_ei
-# "rwweib" -> RWW-EIB-FFI (RWWEIBSimGroup, engine="rwweib"): g_LRE, g_FFI, sigma
+# "rwweib" -> RWW-EIB-FFI (RWWEIBSimGroup, engine="rwweib"): g_LRE, g_FFI, sigma, I_o
+# "rww"    -> stock reduced Wong-Wang (rWWSimGroup, engine="rww"): G, w_p, J_N, sigma
 INFERENCE_MODEL = "wc"
 
 if INFERENCE_MODEL == "rwweib":
-    STAGE1_PARAMS = ["g_LRE", "g_FFI", "sigma"]
-    STAGE1_PRIOR_LOW  = [PRIOR_GLRE_LOW,  PRIOR_GFFI_LOW,  PRIOR_SIGMA_LOW]
-    STAGE1_PRIOR_HIGH = [PRIOR_GLRE_HIGH, PRIOR_GFFI_HIGH, PRIOR_SIGMA_HIGH]
+    STAGE1_PARAMS = ["g_LRE", "g_FFI", "sigma", "I_o"]
+    STAGE1_PRIOR_LOW  = [PRIOR_GLRE_LOW,  PRIOR_GFFI_LOW,  PRIOR_SIGMA_LOW,  PRIOR_IO_LOW]
+    STAGE1_PRIOR_HIGH = [PRIOR_GLRE_HIGH, PRIOR_GFFI_HIGH, PRIOR_SIGMA_HIGH, PRIOR_IO_HIGH]
+elif INFERENCE_MODEL == "rww":
+    STAGE1_PARAMS = ["G", "w_p", "J_N", "sigma"]
+    STAGE1_PRIOR_LOW  = [PRIOR_G_LOW,  PRIOR_WP_LOW,  PRIOR_JN_LOW,  PRIOR_RWWSIG_LOW]
+    STAGE1_PRIOR_HIGH = [PRIOR_G_HIGH, PRIOR_WP_HIGH, PRIOR_JN_HIGH, PRIOR_RWWSIG_HIGH]
 else:
     # Global scalars: g_e*(SC@E) excitatory, g_i*(SC@I) inhibitory, P, Q drives,
     # c_ei E->I coupling.

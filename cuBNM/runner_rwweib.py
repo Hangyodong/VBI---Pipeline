@@ -30,18 +30,18 @@ class ModelNotBuiltError(RuntimeError):
 # RWWEIB regional params + fallback defaults (mirror cuBNM/rww_eib.yaml).
 # config.RWWEIB_FIXED overrides these; the 3 inferred params (g_LRE/g_FFI/sigma)
 # are filled from theta when present, else fall back to these defaults.
+# g_LRE is the model's single global_param (shape (n_sims,)); everything else is
+# a regional_param (shape (n_sims, nodes)). Other params are compile-time
+# constants in rww_eib.yaml. Inferred: g_LRE (global) + g_FFI/sigma/I_o
+# (regional). Fixed regional: w_p/J_N/J_i.
+_GLOBAL_DEFAULT = {"g_LRE": 1.0}
 _RWWEIB_REGIONAL_DEFAULT = {
-    "g_LRE": 1.0, "g_FFI": 1.0, "sigma": 0.01,
-    "J_N": 0.15, "J_i": 1.0, "w_p": 1.4,
-    "W_e": 1.0, "W_i": 0.7, "I_o": 0.382, "I_ext": 0.0,
-    "a_e": 310.0, "b_e": 125.0, "d_e": 0.16,
-    "gamma_e": 0.641 / 1000.0, "tau_e": 100.0,
-    "a_i": 615.0, "b_i": 177.0, "d_i": 0.087,
-    "gamma_i": 1.0 / 1000.0, "tau_i": 10.0,
+    "g_FFI": 1.0, "sigma": 0.01, "I_o": 0.382,
+    "w_p": 1.4, "J_N": 0.15, "J_i": 1.0,
 }
 
-# Which inferred theta columns map to which regional param.
-_INFERRED = ("g_LRE", "g_FFI", "sigma")
+# Inferred regional theta columns (g_LRE handled separately as global).
+_INFERRED = ("g_FFI", "sigma", "I_o")
 
 
 def _import_rwweib():
@@ -97,13 +97,19 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
         for name, dval in regional.items()
     }
 
-    # Override the inferred params with per-sim theta values (broadcast to nodes).
+    # Override the inferred regional params with per-sim theta (broadcast to nodes).
     for name in _INFERRED:
         col = _theta_column(theta, pn, name)
         if col is not None:
             param_lists[name] = np.ascontiguousarray(
                 np.repeat(col[:, None], n_nodes, axis=1), dtype=np.float64
             )
+
+    # Global param g_LRE: per-sim scalar, shape (n_sims,).
+    g_lre = _theta_column(theta, pn, "g_LRE")
+    if g_lre is None:
+        g_lre = np.full(n_sims, _GLOBAL_DEFAULT["g_LRE"], dtype=np.float64)
+    param_lists["g_LRE"] = np.ascontiguousarray(g_lre, dtype=np.float64)
 
     return param_lists
 
