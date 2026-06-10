@@ -3,16 +3,14 @@ two-stage flow, posterior diagnostics, and persistence.
 
 Submodules
 ----------
-- inference.scaling           : ParameterScaler, make_stage*_param_scaler
+- inference.scaling           : ParameterScaler, make_stage1_param_scaler
 - inference.priors            : make_scaled_prior
-- inference.feature_pipeline  : FamilyScaler, FCPCAScaler, FeaturePipeline
-- inference.embedding         : FeatureEmbedding (MLP)
+- inference.feature_pipeline  : FamilyScaler, FeaturePipeline
+- inference.embedding         : RegionTransformerEmbedding, make_embedding_net
 - inference.training_data     : collect_training_data, step2/3,
                                 save/load_extracted_features
 - inference.snpe              : train_snpe, step4/5/6/7/8
-- inference.stage1            : run_stage1_snpe
-- inference.stage2            : run_stage2_snpe, build_stage2_param_set,
-                                select_theta_bad, select_difficult_params
+- inference.stage1            : run_stage1_snpe (Phase 1/2/3)
 - inference.posterior         : transform_observed, infer_subject_raw,
                                 compute_shrinkage_*, posterior_correlation,
                                 posterior_predictive_check
@@ -31,7 +29,6 @@ from inference._utils import _progress
 from inference.scaling import (
     ParameterScaler,
     make_stage1_param_scaler,
-    make_stage2_param_scaler,
 )
 
 # --- priors ---------------------------------------------------------------
@@ -40,12 +37,14 @@ from inference.priors import make_scaled_prior
 # --- feature pipeline -----------------------------------------------------
 from inference.feature_pipeline import (
     FamilyScaler,
-    FCPCAScaler,
     FeaturePipeline,
 )
 
 # --- embedding ------------------------------------------------------------
-from inference.embedding import FeatureEmbedding
+from inference.embedding import (
+    RegionTransformerEmbedding,
+    make_embedding_net,
+)
 
 # --- training data --------------------------------------------------------
 from inference.training_data import (
@@ -70,14 +69,6 @@ from inference.snpe import (
 
 # --- stage drivers --------------------------------------------------------
 from inference.stage1 import run_stage1_snpe
-from inference.stage2 import (
-    _build_nuisance_array,
-    build_stage2_param_set,
-    collect_stage2_data,
-    run_stage2_snpe,
-    select_difficult_params,
-    select_theta_bad,
-)
 
 # --- posterior ------------------------------------------------------------
 from inference.posterior import (
@@ -102,13 +93,12 @@ from inference.io import load_artifacts, save_artifacts
 __all__ = [
     # scaling
     "ParameterScaler", "make_stage1_param_scaler",
-    "make_stage2_param_scaler",
     # priors
     "make_scaled_prior",
     # feature pipeline
-    "FamilyScaler", "FCPCAScaler", "FeaturePipeline",
+    "FamilyScaler", "FeaturePipeline",
     # embedding
-    "FeatureEmbedding",
+    "RegionTransformerEmbedding", "make_embedding_net",
     # training data
     "collect_training_data",
     "step2_simulate_train", "step3_summary_features",
@@ -120,10 +110,6 @@ __all__ = [
     "step8_train_snpe",
     # stage drivers
     "run_stage1_snpe",
-    "run_stage2_snpe",
-    "build_stage2_param_set",
-    "select_theta_bad", "select_difficult_params",
-    "collect_stage2_data",
     # posterior
     "transform_observed", "infer_subject_raw",
     "compute_shrinkage_scaled", "compute_shrinkage_raw",

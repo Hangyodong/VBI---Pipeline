@@ -1,0 +1,143 @@
+# =============================================================================
+# rww_eib.yaml  —  cuBNM model: VBI-based Reduced Wong-Wang E/I with
+#                  excitatory-driven feedforward inhibition  (RWW-EIB-FFI)
+# =============================================================================
+# Schema = upstream cuBNM v0.1.0 codegen (codegen/recipes/*.yaml + model_specs.py),
+# same conventions as cuBNM/wc_vbi.yaml.
+#
+# Reference dynamics: tvboptim WongWangExcInh
+#   (tvboptim/experimental/network_dynamics/dynamics/tvb/wong_wang_exc_inh.py)
+#   == Deco et al. 2014 reduced Wong-Wang with explicit E/I populations.
+#
+# KEY MODELLING DECISION — single connectome coupling:
+#   globalinput_i = sum_j SC_ij * S_e,j      (conn_state_var = S_e)
+#   The SAME long-range signal (SC @ S_e) drives BOTH populations:
+#       E_j -> E_i : long-range excitation     (gain g_LRE)
+#       E_j -> I_i : feedforward inhibition     (gain g_FFI)
+#   This is NOT exact VBI ww.py: VBI couples inhibition via SC @ S_i. We
+#   intentionally use SC @ S_e for the inhibitory pathway (feedforward
+#   inhibition: source = remote excitatory activity, target = local I pop).
+#   => only ONE conn_state_var is needed; NO cuBNM CUDA-core change.
+#
+# Deliberately NOT used (would need a 2nd coupling / core change):
+#   SC @ S_i, conn_state_vars: [S_e, S_i], globalinput_0/1, edge-wise matrices.
+#
+# Standard tvboptim/RWW-EIB fixed values. NOTE a_i = 615.0 (NOT 0.615 — the
+# VBI cupy ww.py 0.615 is a suspected typo). Inhibitory current uses J_N * S_e
+# (NOT the VBI ww.py J_N * S_i).
+#
+# Inferred (STAGE1): g_LRE, g_FFI, sigma  (all regional_param).
+# =============================================================================
+
+model_name: RWWEIB
+full_name: Reduced Wong-Wang E/I with excitatory feedforward inhibition (RWW-EIB-FFI)
+citations:
+  - tvboptim WongWangExcInh
+  - Deco et al. 2014 J Neurosci (10.1523/JNEUROSCI.5068-13.2014)
+  - Wong & Wang 2006 J Neurosci (10.1523/JNEUROSCI.3733-05.2006)
+
+latex_equations: |
+    x_i^E = w_p J_N S_i^E - J_i S_i^I + W_E I_o + g_{LRE} J_N \sum_j C_{ij} S_j^E + I_{ext}
+    x_i^I = J_N S_i^E - S_i^I + W_I I_o + g_{FFI} J_N \sum_j C_{ij} S_j^E
+    H^E(x) = (a_E x - b_E) / (1 - e^{-d_E (a_E x - b_E)})
+    H^I(x) = (a_I x - b_I) / (1 - e^{-d_I (a_I x - b_I)})
+    \dot{S^E} = -S^E/\tau_E + (1 - S^E) \gamma_E H^E
+    \dot{S^I} = -S^I/\tau_I + \gamma_I H^I
+
+init_equations: |
+  S_e = 0.001
+  S_i = 0.001
+
+step_equations: |
+  # globalinput = SC @ S_e  (conn_state_var = S_e). The SAME long-range signal
+  # feeds both populations: E uses gain g_LRE, I uses gain g_FFI (feedforward
+  # inhibition). No SC @ S_i is ever computed.
+  x_e = w_p * J_N * S_e - J_i * S_i + W_e * I_o + g_LRE * J_N * globalinput + I_ext
+  x_i = J_N * S_e - S_i + W_i * I_o + g_FFI * J_N * globalinput
+
+  # Transfer functions (linear-exponential; removable singularity at a*x = b
+  # handled by direct division as upstream rWW — additive noise prevents an
+  # exact hit in practice)
+  H_e = (a_e * x_e - b_e) / (1.0 - exp(-d_e * (a_e * x_e - b_e)))
+  H_i = (a_i * x_i - b_i) / (1.0 - exp(-d_i * (a_i * x_i - b_i)))
+
+  # Derivatives
+  S_e_dot = -S_e / tau_e + (1.0 - S_e) * gamma_e * H_e
+  S_i_dot = -S_i / tau_i + gamma_i * H_i
+
+  # Euler-Maruyama update. Noise on S_e only (matches tvboptim example).
+  S_e += dt * S_e_dot + sqrt_dt * noise_e * sigma
+  S_i += dt * S_i_dot
+
+conn_state_var: S_e
+is_osc: false
+bold_state_var: S_e
+
+variables:
+  # State variables
+  - {name: S_e, type: state_var, description: excitatory synaptic gating}
+  - {name: S_i, type: state_var, description: inhibitory synaptic gating}
+
+  # Intermediate variables
+  - {name: x_e,     type: intermediate_var, description: excitatory input current}
+  - {name: x_i,     type: intermediate_var, description: inhibitory input current}
+  - {name: H_e,     type: intermediate_var, description: excitatory firing rate}
+  - {name: H_i,     type: intermediate_var, description: inhibitory firing rate}
+  - {name: S_e_dot, type: intermediate_var, description: derivative of S_e}
+  - {name: S_i_dot, type: intermediate_var, description: derivative of S_i}
+
+  # Inferred regional params (long-range excitation, feedforward inhibition, noise)
+  - {name: g_LRE,  type: regional_param, value: 1.0,  description: long-range excitation gain (inferred)}
+  - {name: g_FFI,  type: regional_param, value: 1.0,  description: feedforward inhibition gain (inferred)}
+  - {name: sigma,  type: regional_param, value: 0.01, description: noise amplitude (inferred)}
+
+  # Fixed regional params (tvboptim RWW-EIB standard values)
+  - {name: J_N,     type: regional_param, value: 0.15,     description: NMDA synaptic coupling (nA)}
+  - {name: J_i,     type: regional_param, value: 1.0,      description: I->E inhibitory weight}
+  - {name: w_p,     type: regional_param, value: 1.4,      description: local excitatory recurrence}
+  - {name: W_e,     type: regional_param, value: 1.0,      description: E external input weight}
+  - {name: W_i,     type: regional_param, value: 0.7,      description: I external input weight}
+  - {name: I_o,     type: regional_param, value: 0.382,    description: background input current (nA)}
+  - {name: I_ext,   type: regional_param, value: 0.0,      description: external stimulation current}
+  - {name: a_e,     type: regional_param, value: 310.0,    description: E gain (n/C)}
+  - {name: b_e,     type: regional_param, value: 125.0,    description: E threshold (Hz)}
+  - {name: d_e,     type: regional_param, value: 0.16,     description: E saturation (s)}
+  - {name: gamma_e, type: regional_param, value: 0.000641, description: E kinetic (0.641/1000)}
+  - {name: tau_e,   type: regional_param, value: 100.0,    description: E time constant (ms)}
+  - {name: a_i,     type: regional_param, value: 615.0,    description: I gain (n/C) -- standard, NOT 0.615}
+  - {name: b_i,     type: regional_param, value: 177.0,    description: I threshold (Hz)}
+  - {name: d_i,     type: regional_param, value: 0.087,    description: I saturation (s)}
+  - {name: gamma_i, type: regional_param, value: 0.001,    description: I kinetic (1.0/1000)}
+  - {name: tau_i,   type: regional_param, value: 10.0,     description: I time constant (ms)}
+
+  # Noise channel (S_e only)
+  - {name: noise_e, type: noise, description: noise for S_e}
+
+constants:
+  - {type: double, name: dt,      value: dt,           description: integration step}
+  - {type: double, name: sqrt_dt, value: sqrt(mc.dt),  description: square root of integration step}
+
+python_config:
+  sel_state_var: S_e
+  labels:
+    g_LRE: '$g_{LRE}$'
+    g_FFI: '$g_{FFI}$'
+    sigma: '$\sigma$'
+    S_e: '$S_E$'
+    S_i: '$S_I$'
+    J_N: '$J_N$'
+    J_i: '$J_i$'
+    w_p: '$w_p$'
+    W_e: '$W_E$'
+    W_i: '$W_I$'
+    I_o: '$I_o$'
+    a_e: '$a_E$'
+    b_e: '$b_E$'
+    d_e: '$d_E$'
+    gamma_e: '$\gamma_E$'
+    tau_e: '$\tau_E$'
+    a_i: '$a_I$'
+    b_i: '$b_I$'
+    d_i: '$d_I$'
+    gamma_i: '$\gamma_I$'
+    tau_i: '$\tau_I$'

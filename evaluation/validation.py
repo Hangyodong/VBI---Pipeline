@@ -44,7 +44,9 @@ def evaluate_validation_stage1(val_subjects, subject_data, stage1_result,
     """
     if not val_subjects:
         print("[Inference] N_VAL=0 — validation 스킵")
-        return [], {}
+        return [], _empty_validation_agg(
+            stage=1, param_names=config.STAGE1_PARAMS,
+        )
     n_val = len(val_subjects)
     if verbose:
         print(
@@ -123,7 +125,9 @@ def evaluate_validation_stage2(val_subjects, subject_data, stage2_result,
     """
     if not val_subjects:
         print("[Inference] N_VAL=0 — validation 스킵")
-        return [], {}
+        return [], _empty_validation_agg(
+            stage=2, param_names=config.STAGE1_PARAMS,
+        )
     n_val = len(val_subjects)
     if verbose:
         print(
@@ -210,6 +214,27 @@ def evaluate_validation_stage2(val_subjects, subject_data, stage2_result,
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
+
+def _empty_validation_agg(stage, param_names):
+    """Consistent empty aggregate (same keys as ``_aggregate_validation``).
+
+    Returned when there are no validation subjects (e.g. N_VAL=0) so callers
+    can safely do ``agg["per_subject"]`` / ``agg["fc_corr_mean"]`` without
+    KeyError. Numeric means are NaN; ``per_subject`` is an empty list.
+    """
+    nan = float("nan")
+    empty = np.full(len(param_names), nan, dtype=float)
+    return {
+        "stage": stage,
+        "fc_corr_mean": nan,
+        "fc_rmse_mean": nan,
+        "fcd_rmse_mean": nan,
+        "shrinkage_mean": empty,
+        "shrinkage_per_param": empty,
+        "per_subject": [],
+        "param_names": list(param_names),
+    }
+
 
 def _aggregate_validation(results, stage, param_names):
     return {

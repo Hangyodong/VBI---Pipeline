@@ -57,7 +57,6 @@ from evaluation.model_selection import (
 from evaluation.final_test import (
     _print_test_summary,
     _test_stage1,
-    _test_stage2,
     final_test,
 )
 
@@ -86,8 +85,6 @@ from evaluation.reports import (
     report_step7,
     report_step8,
     report_step9,
-    report_step10,
-    report_step11,
     report_step12,
     report_step13,
     report_step14,
@@ -114,6 +111,6 @@ __all__ = [
     "print_final_summary",
     "report_step1", "report_step2", "report_step3", "report_step4",
     "report_step5", "report_step6", "report_step7", "report_step8",
-    "report_step9", "report_step10", "report_step11", "report_step12",
+    "report_step9", "report_step12",
     "report_step13", "report_step14",
 ]

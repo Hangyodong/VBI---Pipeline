@@ -45,12 +45,19 @@ def _progress(msg):
 # ---------------------------------------------------------------------------
 
 def fc_metrics(fc_obs, fc_pred, nan_mask=None):
-    """FC correlation, RMSE, and MAE on the full upper triangle."""
+    """FC correlation, RMSE, and MAE on the upper triangle.
+
+    ``nan_mask`` (N, N bool) flags original-NaN FC entries that were replaced
+    with 0 at load time. Those are finite, so isfinite() cannot drop them —
+    they are excluded explicitly here when the mask is provided.
+    """
     n = fc_obs.shape[0]
     iu = np.triu_indices(n, k=1)
     a = fc_obs[iu]
     b = fc_pred[iu]
     mask = np.isfinite(a) & np.isfinite(b)
+    if nan_mask is not None:
+        mask &= ~np.asarray(nan_mask, dtype=bool)[iu]
     if mask.sum() < 2:
         return {"corr": 0.0, "rmse": 1.0, "mae": 1.0}
     a, b = a[mask], b[mask]
@@ -150,7 +157,7 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
     fc_corrs, fc_rmses, fcd_rmses, fc_preds = _resimulate_and_score(
         n_resim, samples_raw, param_names, fixed_overrides,
         sc, dly, fc_obs_full, fcd_obs_raw, apply_bw,
-        sid=sid, verbose=verbose,
+        sid=sid, verbose=verbose, fc_nan=d.get("fc_nan"),
     )
 
     result = {
@@ -187,12 +194,12 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
 def _resimulate_and_score(n_resim, samples_raw, param_names,
                           fixed_overrides, sc, dly,
                           fc_obs_full, fcd_obs_raw, apply_bw,
-                          sid=None, verbose=True):
+                          sid=None, verbose=True, fc_nan=None):
     """Re-simulate from posterior samples; score FC (+ FCD)."""
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
     )
-    from simulation.wc_runner import simulate_gpu_batch
+    from cuBNM.simulate import simulate_gpu_batch   # all sims via cuBNM
 
     fc_corrs, fc_rmses, fcd_rmses, fc_preds = [], [], [], []
     t_resim = time.time()
@@ -231,7 +238,7 @@ def _resimulate_and_score(n_resim, samples_raw, param_names,
                 continue
             fc_pred = compute_fc(bold)
             fc_preds.append(fc_pred)
-            m = fc_metrics(fc_obs_full, fc_pred)
+            m = fc_metrics(fc_obs_full, fc_pred, nan_mask=fc_nan)
             fc_corrs.append(m["corr"])
             fc_rmses.append(m["rmse"])
             if use_fcd:
@@ -259,8 +266,9 @@ def baseline_eval(sid, subject_data, n_resim=10, apply_bw=True,
     """Prior-midpoint baseline simulation."""
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
-        extract_observed_features, simulate_single,
+        extract_observed_features,
     )
+    from cuBNM.simulate import simulate_single   # all sims via cuBNM
 
     d = subject_data[sid]
     fc_obs_full = d["fc"]
@@ -285,7 +293,7 @@ def baseline_eval(sid, subject_data, n_resim=10, apply_bw=True,
             )
             bold = bolds[0]
             fc_pred = compute_fc(bold)
-            m = fc_metrics(fc_obs_full, fc_pred)
+            m = fc_metrics(fc_obs_full, fc_pred, nan_mask=d.get("fc_nan"))
             fc_corrs.append(m["corr"])
             fc_rmses.append(m["rmse"])
             if use_fcd:

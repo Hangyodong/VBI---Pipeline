@@ -4,7 +4,6 @@ Public API
 ----------
 - ParameterScaler              : raw <-> scaled mapping, with subset/to_dict
 - make_stage1_param_scaler()   : scaler for Stage 1 prior
-- make_stage2_param_scaler(p)  : scaler for theta_bad + c-params
 
 Why this exists
 ---------------
@@ -20,8 +19,7 @@ Design notes
 - The mapping is **data-free**: it depends only on the prior box.
 - ``to_dict(theta)`` returns ``{param_name: value}`` for raw arrays,
   matching the dict form WC_sde expects.
-- ``subset(names)`` produces a scaler over a parameter subset (used by
-  Stage 2 where only theta_bad + c-params are inferred).
+- ``subset(names)`` produces a scaler over a parameter subset.
 """
 import numpy as np
 
@@ -95,25 +93,3 @@ def make_stage1_param_scaler():
         config.STAGE1_PRIOR_LOW,
         config.STAGE1_PRIOR_HIGH,
     )
-
-
-def make_stage2_param_scaler(stage2_params):
-    """ParameterScaler over selected Stage 1 params + c-params."""
-    s1_lookup = {
-        n: (low, high) for n, low, high in zip(
-            config.STAGE1_PARAMS,
-            config.STAGE1_PRIOR_LOW,
-            config.STAGE1_PRIOR_HIGH,
-        )
-    }
-    low, high = [], []
-    for name in stage2_params:
-        if name in s1_lookup:
-            lo, hi = s1_lookup[name]
-        elif name in config.C_PARAM_PRIOR:
-            lo, hi = config.C_PARAM_PRIOR[name]
-        else:
-            raise ValueError(f"Unknown parameter: {name}")
-        low.append(lo)
-        high.append(hi)
-    return ParameterScaler(stage2_params, low, high)

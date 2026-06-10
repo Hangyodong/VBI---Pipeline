@@ -56,10 +56,32 @@ def infer_subject_raw(posterior, x_obs_input, param_scaler,
     n_samples = n_samples or config.N_POSTERIOR
     _dev = getattr(config, "SBI_DEVICE", "cpu")
     x_t = torch.tensor(x_obs_input, dtype=torch.float32).to(_dev)
-    samples_scaled = (
-        posterior.sample((n_samples,), x=x_t, show_progress_bars=False)
-        .cpu().numpy().astype(np.float32)
-    )
+    try:
+        # Prefer rejection (prior-bounded samples → correct metrics), with a
+        # time cap so heavy leakage can't hang the run.
+        samples_scaled = (
+            posterior.sample(
+                (n_samples,), x=x_t, show_progress_bars=False,
+                max_sampling_time=getattr(
+                    config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
+                return_partial_on_timeout=True,
+            )
+            .cpu().numpy().astype(np.float32)
+        )
+    except RuntimeError:
+        # Near-zero acceptance (empirical FC is out-of-distribution vs the
+        # simulated training FC, so the flow leaks outside the prior box and
+        # rejection collects 0 samples → sbi raises). Fall back to direct
+        # flow sampling, then clip to the prior box [-1, 1] so inverse_transform
+        # yields parameters within prior bounds.
+        samples_scaled = (
+            posterior.sample(
+                (n_samples,), x=x_t, show_progress_bars=False,
+                reject_outside_prior=False,
+            )
+            .detach().cpu().numpy().astype(np.float32)
+        )
+        samples_scaled = np.clip(samples_scaled, -1.0, 1.0)
 
     samples_raw = param_scaler.inverse_transform(samples_scaled)
     means_raw = samples_raw.mean(axis=0)
@@ -113,8 +135,8 @@ def posterior_predictive_check(sid, subject_data, posterior,
     """Posterior predictive simulation + comparison to observed FC/FCD."""
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
-        simulate_single,
     )
+    from cuBNM.simulate import simulate_single   # all sims via cuBNM
 
     n_predictive = n_predictive or config.N_PPC
     d = subject_data[sid]
@@ -129,6 +151,12 @@ def posterior_predictive_check(sid, subject_data, posterior,
 
     fc_obs_full = d["fc"]
     iu = np.triu_indices(fc_obs_full.shape[0], k=1)
+    # Original-NaN positions were replaced with 0 at load time, so they are
+    # finite — isfinite() alone cannot exclude them. Use the recorded NaN
+    # mask to drop those ~46% entries from corr/RMSE.
+    fc_nan_vec = (
+        d["fc_nan"][iu] if "fc_nan" in d else np.zeros(iu[0].shape, dtype=bool)
+    )
 
     fc_corrs, fc_rmses, fcd_rmses = [], [], []
     for i in range(min(n_predictive, len(samples_raw))):
@@ -144,7 +172,7 @@ def posterior_predictive_check(sid, subject_data, posterior,
 
             obs_vec = fc_obs_full[iu]
             pred_vec = fc_pred[iu]
-            mask = np.isfinite(obs_vec) & np.isfinite(pred_vec)
+            mask = np.isfinite(obs_vec) & np.isfinite(pred_vec) & ~fc_nan_vec
             if (mask.sum() > 10
                     and obs_vec[mask].std() > 0
                     and pred_vec[mask].std() > 0):

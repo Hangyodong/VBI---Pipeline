@@ -20,7 +20,7 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass, field, fields
-from typing import Dict, List, Tuple
+from typing import List
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +35,20 @@ class PipelineConfig:
     H100 NVL run; reduce N_SIM / T_END_MS for quick tests.
     """
 
+    # ── Species / atlas ──
+    SPECIES: str = "mouse"
+    N_REGIONS: int = 115
+    VELOCITY_M_PER_S: float = 1.5
+
     # ── Paths ──
     DATA_DIR: str = "/scratch/home/wog3597/vbi"
     OUTPUT_DIR: str = "./output_mouse_mptp"
+    # Data file basenames (resolved against DATA_DIR). Override for human.
+    FC_FILE: str = "MPTP_FC_115.mat"
+    SC_FILE: str = "MPTP_SC_115.mat"
+    TSV_FILE: str = "participants.tsv"
+    ATLAS_FILE: str = "atlas_115_labels.txt"
+    BOLD_FILE: str = "MPTP_BOLD_115.mat"
 
     # ── Subject split ──
     N_TRAIN: int = 4
@@ -47,12 +58,12 @@ class PipelineConfig:
 
     # ── Simulation ──
     N_SIM: int = 10_000
-    N_SIM_S2: int = 10_000
     GPU_BATCH: int = 10_000
 
     # ── Simulation time (ms) ──
-    T_END_MS: float = 30_000.0
-    T_CUT_MS: float = 5_000.0
+    # 12 min total (matches real fMRI scan); 60s transient cut → 660s analysis window
+    T_END_MS: float = 720_000.0
+    T_CUT_MS: float = 60_000.0
 
     # ── Time discretization ──
     DT: float = 0.5
@@ -67,36 +78,40 @@ class PipelineConfig:
     HRF_LENGTH_SEC: float = 32.0   # kernel length (sec)
     HRF_LENGTH_MS: float = 20_000.0  # TVB Bold hrf_length (ms)
 
-    # ── Stage 1 prior ──
+    # ── Prior bounds (global scalars P, Q, g_e, g_i, c_ei) ──
+    PRIOR_P_LOW:   float = 0.0
+    PRIOR_P_HIGH:  float = 3.0
+    PRIOR_Q_LOW:   float = 0.0
+    PRIOR_Q_HIGH:  float = 3.0
+    PRIOR_GE_LOW:  float = 0.0
+    PRIOR_GE_HIGH: float = 1.0
+    PRIOR_GI_LOW:  float = 0.0
+    PRIOR_GI_HIGH: float = 1.0
+    PRIOR_CEI_LOW:  float = 6.0
+    PRIOR_CEI_HIGH: float = 18.0
+
+    # ── Stage 1 prior (global scalars P, Q, g_e, g_i, c_ei) ──
     STAGE1_PARAMS: List[str] = field(
-        default_factory=lambda: ["P", "Q", "g_e", "g_i"]
+        default_factory=lambda: ["P", "Q", "g_e", "g_i", "c_ei"]
     )
     STAGE1_PRIOR_LOW: List[float] = field(
-        default_factory=lambda: [0.5, 0.0, 0.0, 0.0]
+        default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 6.0]
     )
     STAGE1_PRIOR_HIGH: List[float] = field(
-        default_factory=lambda: [2.5, 2.0, 1.5, 1.5]
-    )
-
-    # ── Stage 2 c-parameter prior ──
-    C_PARAM_PRIOR: Dict[str, Tuple[float, float]] = field(
-        default_factory=lambda: {
-            "c_ee": (12.0, 20.0),
-            "c_ei": (8.0, 16.0),
-            "c_ie": (10.0, 20.0),
-            "c_ii": (1.0, 6.0),
-        }
+        default_factory=lambda: [3.0, 3.0, 1.0, 1.0, 18.0]
     )
 
     # ── Features ──
     USE_FCD: bool = False   # FCD disabled by default (use FC only)
 
-    # ── Embedding ──
-    PCA_DIM_FC: int = 200
-    PCA_DIM_FCD: int = 100
-    EMBED_DIM: int = 64
-    EMBED_HIDDEN: int = 256
-    USE_EMBEDDING: bool = False
+    # ── Embedding (RegionTransformer, Phase 3) ──
+    EMBED_DIM: int = 128
+    REGION_TRANSFORMER_HEADS: int = 4
+    REGION_TRANSFORMER_LAYERS: int = 2
+    REGION_TRANSFORMER_D_MODEL: int = 128
+
+    # ── Phase-2 attention × gradient selection ──
+    SELECTION_K: int = 300
 
     # ── SBI ──
     SBI_DEVICE: str = "cuda"
@@ -136,14 +151,20 @@ def _apply_to_config(cfg: PipelineConfig):
     """Push PipelineConfig fields into the global `config` module."""
     import config
 
+    # Species / atlas
+    config.SPECIES = cfg.SPECIES
+    config.N_REGIONS = cfg.N_REGIONS
+    config.FC_DIM = cfg.N_REGIONS * (cfg.N_REGIONS - 1) // 2
+    config.VELOCITY_M_PER_S = cfg.VELOCITY_M_PER_S
+
     # Paths
     config.DATA_DIR = cfg.DATA_DIR
     config.OUTPUT_DIR = cfg.OUTPUT_DIR
-    config.FC_PATH = f"{cfg.DATA_DIR}/MPTP_FC_115.mat"
-    config.SC_PATH = f"{cfg.DATA_DIR}/MPTP_SC_115.mat"
-    config.TSV_PATH = f"{cfg.DATA_DIR}/participants.tsv"
-    config.ATLAS_PATH = f"{cfg.DATA_DIR}/atlas_115_labels.txt"
-    config.BOLD_PATH = f"{cfg.DATA_DIR}/MPTP_BOLD_115.mat"
+    config.FC_PATH = f"{cfg.DATA_DIR}/{cfg.FC_FILE}"
+    config.SC_PATH = f"{cfg.DATA_DIR}/{cfg.SC_FILE}"
+    config.TSV_PATH = f"{cfg.DATA_DIR}/{cfg.TSV_FILE}"
+    config.ATLAS_PATH = f"{cfg.DATA_DIR}/{cfg.ATLAS_FILE}"
+    config.BOLD_PATH = f"{cfg.DATA_DIR}/{cfg.BOLD_FILE}"
 
     # Split
     config.N_TRAIN = cfg.N_TRAIN
@@ -153,7 +174,6 @@ def _apply_to_config(cfg: PipelineConfig):
 
     # Simulation
     config.N_SIM = cfg.N_SIM
-    config.N_SIM_S2 = cfg.N_SIM_S2
     config.GPU_BATCH = cfg.GPU_BATCH
     config.T_END = cfg.T_END_MS
     config.T_CUT = cfg.T_CUT_MS
@@ -173,19 +193,41 @@ def _apply_to_config(cfg: PipelineConfig):
     config.HRF_LENGTH_SEC = cfg.HRF_LENGTH_SEC
     config.HRF_LENGTH_MS = cfg.HRF_LENGTH_MS
 
-    # Priors
-    config.STAGE1_PARAMS = list(cfg.STAGE1_PARAMS)
-    config.STAGE1_PRIOR_LOW = list(cfg.STAGE1_PRIOR_LOW)
-    config.STAGE1_PRIOR_HIGH = list(cfg.STAGE1_PRIOR_HIGH)
-    config.C_PARAM_PRIOR = dict(cfg.C_PARAM_PRIOR)
+    # Prior bounds
+    config.PRIOR_P_LOW   = cfg.PRIOR_P_LOW
+    config.PRIOR_P_HIGH  = cfg.PRIOR_P_HIGH
+    config.PRIOR_Q_LOW   = cfg.PRIOR_Q_LOW
+    config.PRIOR_Q_HIGH  = cfg.PRIOR_Q_HIGH
+    config.PRIOR_GE_LOW  = cfg.PRIOR_GE_LOW
+    config.PRIOR_GE_HIGH = cfg.PRIOR_GE_HIGH
+    config.PRIOR_GI_LOW  = cfg.PRIOR_GI_LOW
+    config.PRIOR_GI_HIGH = cfg.PRIOR_GI_HIGH
+    config.PRIOR_CEI_LOW  = cfg.PRIOR_CEI_LOW
+    config.PRIOR_CEI_HIGH = cfg.PRIOR_CEI_HIGH
 
-    # Embedding
-    config.PCA_DIM_FC = cfg.PCA_DIM_FC
-    config.PCA_DIM_FCD = cfg.PCA_DIM_FCD
+    # STAGE1_PARAMS / PRIOR_LOW / PRIOR_HIGH — global scalars.
+    config.STAGE1_PARAMS = ["P", "Q", "g_e", "g_i", "c_ei"]
+    config.STAGE1_PRIOR_LOW = [
+        cfg.PRIOR_P_LOW, cfg.PRIOR_Q_LOW,
+        cfg.PRIOR_GE_LOW, cfg.PRIOR_GI_LOW,
+        cfg.PRIOR_CEI_LOW,
+    ]
+    config.STAGE1_PRIOR_HIGH = [
+        cfg.PRIOR_P_HIGH, cfg.PRIOR_Q_HIGH,
+        cfg.PRIOR_GE_HIGH, cfg.PRIOR_GI_HIGH,
+        cfg.PRIOR_CEI_HIGH,
+    ]
+    config.PARAM_NAMES_STAGE1 = config.STAGE1_PARAMS
+
+    # Embedding / features
     config.USE_FCD = cfg.USE_FCD
     config.EMBED_DIM = cfg.EMBED_DIM
-    config.EMBED_HIDDEN = cfg.EMBED_HIDDEN
-    config.USE_EMBEDDING = cfg.USE_EMBEDDING
+    config.REGION_TRANSFORMER_HEADS   = cfg.REGION_TRANSFORMER_HEADS
+    config.REGION_TRANSFORMER_LAYERS  = cfg.REGION_TRANSFORMER_LAYERS
+    config.REGION_TRANSFORMER_D_MODEL = cfg.REGION_TRANSFORMER_D_MODEL
+
+    # Phase-2 selection
+    config.SELECTION_K = cfg.SELECTION_K
 
     # SBI
     config.SBI_DEVICE = cfg.SBI_DEVICE

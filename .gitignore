@@ -24,3 +24,6 @@ apply_patch.py
 # 로그
 *.log
 .env
+
+# SBI 로그
+sbi-logs/

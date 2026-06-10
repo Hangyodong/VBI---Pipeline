@@ -46,8 +46,9 @@ def simulation_based_calibration(posterior, prior_scaled, param_scaler,
     """Run SBC: prior sample -> simulate -> rank posterior samples."""
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fc_to_upper_tri,
-        fcd_to_upper_tri, simulate_single,
+        fcd_to_upper_tri,
     )
+    from cuBNM.simulate import simulate_gpu_batch   # all sims via cuBNM
 
     n_sbc = n_sbc or config.N_SBC
     n_posterior = n_posterior or 1000
@@ -58,34 +59,59 @@ def simulation_based_calibration(posterior, prior_scaled, param_scaler,
             f"{n_posterior} posterior samples each"
         )
 
-    ranks = []
     t0 = time.time()
-    for k in range(n_sbc):
-        theta_scaled = prior_scaled.sample().cpu().numpy()
-        theta_raw = param_scaler.inverse_transform(theta_scaled[None, :])[0]
 
-        params = dict(fixed_overrides or {})
-        for j, name in enumerate(param_names):
-            params[name] = float(theta_raw[j])
+    # ── 1) sample ALL theta up front (scaled + raw) ──────────────────
+    theta_scaled_all = (
+        prior_scaled.sample((n_sbc,)).cpu().numpy().astype(np.float32)
+    )
+    theta_raw_all = param_scaler.inverse_transform(theta_scaled_all)
 
+    # ── 2) batch-simulate ALL n_sbc draws via cuBNM in one GPU call ──
+    #     (replaces the old per-iteration VBI simulate_single loop)
+    bolds_all = simulate_gpu_batch(
+        weights, theta_raw_all, param_names=list(param_names),
+        fixed_overrides=fixed_overrides, delays=delays, apply_bw=True,
+        label="SBC", n_total=n_sbc,
+    )
+    if verbose:
+        _progress(
+            f"SBC: simulated {len(bolds_all)}/{n_sbc} via cuBNM "
+            f"({time.time() - t0:.1f}s); ranking posteriors ..."
+        )
+
+    # ── 3) per-draw feature extraction + posterior rank ──────────────
+    ranks = []
+    _first_err = None
+    _dev = getattr(config, "SBI_DEVICE", "cpu")
+    for k in range(min(n_sbc, len(bolds_all))):
         try:
-            bolds = simulate_single(
-                weights, params, n_repeat=1, delays=delays,
-            )
-            bold = bolds[0]
+            bold = bolds_all[k]
             fc_vec = fc_to_upper_tri(compute_fc(bold))
             fcd_vec = fcd_to_upper_tri(compute_sim_fcd_matrix(bold))
 
             x_obs = feature_pipeline.transform(fc_vec, fcd_vec)
-            x_t = torch.tensor(x_obs, dtype=torch.float32)
+            # x_t MUST live on the posterior's device (SBI_DEVICE); a CPU
+            # tensor against a CUDA posterior raises and would silently drop
+            # every SBC draw.
+            x_t = torch.tensor(
+                np.atleast_2d(x_obs), dtype=torch.float32, device=_dev,
+            )
             samples_scaled = (
                 posterior.sample(
                     (n_posterior,), x=x_t, show_progress_bars=False,
+                    # SBC ranks need prior-bounded samples → keep rejection;
+                    # cap time so a leaky iteration can't stall the loop.
+                    max_sampling_time=getattr(
+                        config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
+                    return_partial_on_timeout=True,
                 ).cpu().numpy()
             )
-            rank = (samples_scaled < theta_scaled).sum(axis=0)
+            rank = (samples_scaled < theta_scaled_all[k]).sum(axis=0)
             ranks.append(rank)
-        except Exception:
+        except Exception as e:           # don't silently swallow ALL draws
+            if _first_err is None:
+                _first_err = e
             continue
 
         if verbose and (k + 1) in {
@@ -96,13 +122,20 @@ def simulation_based_calibration(posterior, prior_scaled, param_scaler,
         }:
             pct = (k + 1) / n_sbc * 100
             _progress(
-                f"SBC {k + 1}/{n_sbc} ({pct:.0f}%)  "
+                f"SBC rank {k + 1}/{n_sbc} ({pct:.0f}%)  "
                 f"({time.time() - t0:.1f}s)"
             )
 
     ranks = np.array(ranks)
     if verbose:
-        print(f"    SBC done ({time.time() - t0:.1f}s)")
+        n_fail = n_sbc - len(ranks)
+        if n_fail > 0 and _first_err is not None:
+            print(
+                f"    SBC: {n_fail}/{n_sbc} draws failed during ranking "
+                f"(first error: {type(_first_err).__name__}: {_first_err})"
+            )
+        print(f"    SBC done — {len(ranks)}/{n_sbc} ranks "
+              f"({time.time() - t0:.1f}s)")
     return ranks
 
 

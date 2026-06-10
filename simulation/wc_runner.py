@@ -4,8 +4,8 @@ Public API
 ----------
 - simulate_gpu_batch(weights, theta_batch, param_names, ...) -> list[BOLD]
 - simulate_single(weights, params_dict, n_repeat, delays, apply_bw)
-- _import_wc()           : lazy import of vbi.models.cupy.wilson_cowan.WC_sde
-- detect_engine_key()    : auto-detect VBI engine parameter name
+- _import_wc()           : lazy import of simulation.wc_eib.WC_EIB
+- detect_engine_key()    : auto-detect WC engine parameter name
 - to_numpy(x)            : cupy -> numpy
 - normalize_ts(...)      : reshape WC raw output to (T, N) or (T, N, S)
 - _run_streaming_hrf(...): step-by-step integration + Bold Monitor
@@ -19,9 +19,12 @@ Critical invariants
 2. **Fallback preserves alignment.** If VBI cannot accept per-sim
    parameter arrays, we drop to a per-theta loop with num_sim=1. This is
    slower but the (theta_i, BOLD_i) pair stays correct.
-3. **BoldMonitor runs on CPU (numpy).** WC heunStochastic stays on GPU
-   (cupy); E values are transferred to CPU at each interim step. This
-   avoids cupy NVRTC compilation issues with mismatched CUDA headers.
+3. **BoldMonitor runs on GPU (cupy) when available.** WC heunStochastic
+   produces E on GPU; the BoldMonitor stock buffer + HRF kernel ride on
+   the same cupy backend, so no per-step host transfer is needed. The
+   HRF kernel itself is computed once in numpy (TVB MixtureOfGammas →
+   no NVRTC) and then transferred onto cupy. Falls back to per-step
+   numpy transfer when cupy is unavailable.
 """
 import math
 import time
@@ -43,8 +46,8 @@ def _import_wc():
     """Import the cupy WC class on first use."""
     global _WC_SDE_CLASS
     if _WC_SDE_CLASS is None:
-        from vbi.models.cupy.wilson_cowan import WC_sde
-        _WC_SDE_CLASS = WC_sde
+        from simulation.wc_eib import WC_EIB
+        _WC_SDE_CLASS = WC_EIB
     return _WC_SDE_CLASS
 
 
@@ -132,25 +135,16 @@ def _trim_memory_pool(cp):
 
 
 def _alloc_stride_buffers(cp, stride, nn, ns):
-    """OPT-1 + OPT-3: stride-sized GPU staging + pinned CPU host buffer.
+    """OPT-1: stride-sized GPU staging buffer.
 
-    Returns ``(gpu_buf, cpu_buf, pinned_handle)``. The handle MUST stay in
-    scope for the lifetime of ``cpu_buf`` or the pinned host pages may be
-    reclaimed. Falls back to an unpinned numpy buffer if pinned allocation
-    is unavailable (the inner loop then still benefits from batched
-    transfers — only the DMA-bypass-cache speedup is lost).
+    Returns ``(gpu_buf, cpu_buf, pinned_handle)``. With the BoldMonitor
+    running on cupy, the CPU staging buffer + pinned host pages are no
+    longer needed — both extra slots are returned as ``None``. Signature
+    is preserved for backward compatibility with callers / GPU-1
+    invariant grep.
     """
     gpu_buf = cp.empty((stride, nn, ns), dtype=cp.float32)
-    nbytes = int(stride) * int(nn) * int(ns) * np.dtype(np.float32).itemsize
-    try:
-        pinned = cp.cuda.alloc_pinned_memory(nbytes)
-        cpu_buf = np.frombuffer(pinned, dtype=np.float32).reshape(
-            stride, nn, ns
-        )
-        return gpu_buf, cpu_buf, pinned
-    except Exception:
-        cpu_buf = np.empty((stride, nn, ns), dtype=np.float32)
-        return gpu_buf, cpu_buf, None
+    return gpu_buf, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +172,11 @@ def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
     nn = n_nodes
     ns = num_sim
 
-    n_steps = int(np.ceil(model.t_end / dt_full))
+    # +1 so the loop reaches the final boundary step (step_idx = t_end/dt).
+    # Without it the BOLD monitor emits its last TR frame one period early
+    # (e.g. T=239 instead of 240 for t_end=300s, t_cut=60s, TR=1s), making
+    # the VBI BOLD T off-by-one vs cuBNM (= config.ANALYSIS_BOLD_T).
+    n_steps = int(round(model.t_end / dt_full)) + 1
 
     if not apply_bw:
         # accumulate decimated E in RAM only
@@ -196,30 +194,34 @@ def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
                 buf_idx += 1
         return e_out[:buf_idx]
 
-    # TVB Bold Monitor — always on CPU (numpy) to avoid cupy NVRTC issues.
+    # TVB Bold Monitor on GPU when cupy is available (HRF + stock buffers
+    # ride on cupy). The HRF kernel is computed once in numpy and then
+    # transferred onto cupy — no NVRTC compilation triggered.
     mon = BoldMonitor(
         nn=nn, ns=ns,
         dt_ms=dt_full,
-        xp=np,                          # force CPU
+        xp=np,                          # legacy default; overridden by use_gpu
+        use_gpu=True,                   # → cupy backend if available
         period_ms=config.TR_SEC * 1000.0,
         hrf_length_ms=getattr(config, "HRF_LENGTH_MS", 20_000.0),
     )
 
-    # OPT-1 + OPT-3: stride-batched GPU staging + pinned host buffer.
-    # Cuts host-blocking PCIe syncs from `n_steps` (600 K) to
-    # `n_steps / stride` (~75 K) without changing the per-step E value
-    # that mon.step() sees — every BoldMonitor input is bit-identical to
-    # the per-step .get() implementation it replaces.
+    # OPT-1: stride-batched GPU staging. With the BoldMonitor on cupy, the
+    # per-step host transfer (gpu_buf.get) and the pinned CPU buffer are
+    # no longer needed — gpu_buf slices are fed straight into mon.step().
+    # _alloc_stride_buffers keeps its signature (cpu_buf returned as None
+    # for backward compat) so the GPU-1 invariant text is preserved.
     try:
         import cupy as cp  # only available when running on GPU
         stride = max(1, int(getattr(mon, "_interim_istep", 1)))
-        gpu_buf, cpu_buf, _pinned_handle = _alloc_stride_buffers(
+        gpu_buf, _cpu_buf, _pinned_handle = _alloc_stride_buffers(
             cp, stride, nn, ns
         )
-        use_gpu_buffer = True
+        use_gpu_buffer = bool(getattr(mon, "_on_gpu", False))
     except Exception:
         # cupy unavailable (e.g. CPU-only test environment) — fall back to
-        # the original per-step transfer path.
+        # the per-step transfer path. mon will also have fallen back to
+        # numpy internally, so passing E_cpu is correct.
         use_gpu_buffer = False
 
     if use_gpu_buffer:
@@ -230,12 +232,9 @@ def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
                 t_curr = (i + j) * dt_full
                 model.x0 = model.heunStochastic(model.x0, t_curr)
                 gpu_buf[j] = model.x0[:nn, :]
-            if burst == stride:
-                gpu_buf.get(out=cpu_buf)
-            else:
-                gpu_buf[:burst].get(out=cpu_buf[:burst])
+            # No host transfer — BoldMonitor runs on cupy now.
             for j in range(burst):
-                mon.step(i + j, cpu_buf[j], t_cut_ms=t_cut)
+                mon.step(i + j, gpu_buf[j], t_cut_ms=t_cut)
             i += burst
             if progress_fn is not None:
                 progress_fn(i, n_steps)
@@ -258,47 +257,44 @@ def _run_streaming_hrf(model, n_nodes, num_sim, dt_ms, apply_bw,
 # Per-simulation parameter injection
 # ---------------------------------------------------------------------------
 
-def _try_per_sim_params(params, chunk, param_names):
-    """Inject per-simulation parameter arrays into VBI WC params.
+def _expand_global(chunk, param_names, n_nodes):
+    """Expand global scalars (P, Q, g_e, g_i) to per-sim arrays.
 
-    VBI Wilson-Cowan expects scalar parameters (P, Q, c_ee, etc.) as
-    shape ``(n_nodes, n_sim)``. Internally ``prepare_input`` does::
+    chunk        : (n_sim, n_params)
+    returns dict : {name: (n_nodes, n_sim) float32}
 
-        self.P = self.xp.array(self.P).reshape(-1, 1)     # if scalar
-        # or accepts (n_nodes, num_sim) directly
+    Broadcast each scalar column to (n_nodes, n_sim) so it satisfies the
+    per-sim (n_nodes, csz) shape contract enforced by ``simulate_gpu_batch``
+    (INV-2). WC-EIB reads g_e/g_i as global scalars and broadcasts P/Q.
+    """
+    n_sim = chunk.shape[0]
+    params_out = {}
+    for i, name in enumerate(param_names):
+        col = chunk[:, i].astype(np.float32)              # (n_sim,)
+        tiled = np.broadcast_to(col[None, :], (n_nodes, n_sim))
+        params_out[name] = np.ascontiguousarray(tiled, dtype=np.float32)
+    return params_out
 
-    And the dynamics line is::
 
-        x_e = self.alpha_e * (self.c_ee * E - self.c_ei * I
-                              + self.P - self.theta_e + lc_e)
+def _try_per_sim_params(params, chunk, param_names, n_nodes=None):
+    """Inject per-simulation parameter arrays into the WC parameter dict.
 
-    where ``E`` has shape ``(n_nodes, n_sim)``. So ``self.P`` must
-    broadcast against that — either ``(n_nodes, n_sim)`` (homogeneous
-    per-region, varying per-sim) or scalar.
-
-    We want **per-simulation but same value across all nodes** of each
-    sim: tile ``chunk[:, i]`` (shape ``(n_sim,)``) along the node axis
-    to produce ``(n_nodes, n_sim)``.
-
-    Parameters
-    ----------
-    params : dict           VBI WC parameter dict (mutated in place)
-    chunk  : (n_sim, n_p)   per-simulation theta values
-    param_names : list[str] names matching the columns of ``chunk``
+    WC-EIB (and its VBI-compatible interface) expects parameters as
+    shape ``(n_nodes, n_sim)``. Global scalars P, Q, g_e, g_i, c_ei are
+    broadcast to per-node-per-sim arrays.
 
     Returns
     -------
-    True   (caller's try/except handles actual VBI-side rejection)
+    effective_names : list[str]
+        The parameter keys whose shape should be asserted by the caller.
     """
     weights = params["weights"]
-    n_nodes = weights.shape[0]
-    n_sim = chunk.shape[0]
-    for i, name in enumerate(param_names):
-        col = chunk[:, i].astype(np.float32)              # (n_sim,)
-        # Tile along node axis: (n_nodes, n_sim), same value per node
-        tiled = np.broadcast_to(col[None, :], (n_nodes, n_sim))
-        params[name] = np.ascontiguousarray(tiled, dtype=np.float32)
-    return True
+    n_nodes = n_nodes or weights.shape[0]
+
+    expanded = _expand_global(chunk, param_names, n_nodes)
+    for k, v in expanded.items():
+        params[k] = v
+    return list(param_names)
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +389,14 @@ def simulate_gpu_batch(weights, theta_batch, param_names,
         _apply_delay(params, delays)
 
         # Per-simulation parameter arrays (CRITICAL — replaces batch mean)
-        _try_per_sim_params(params, chunk, param_names)
+        effective_names = _try_per_sim_params(
+            params, chunk, param_names, n_nodes=n_nodes,
+        )
 
         # Sanity check: parameter arrays must be (n_nodes, csz), not
         # scalar. Catches accidental regressions to batch-mean.
         n_nodes_chk = weights.shape[0]
-        for name in param_names:
+        for name in effective_names:
             v = params[name]
             assert (
                 hasattr(v, "shape") and v.shape == (n_nodes_chk, csz)
@@ -463,8 +461,10 @@ def simulate_gpu_batch(weights, theta_batch, param_names,
                 p_single["seed"] = None
                 p_single.update(overrides)
                 _apply_delay(p_single, delays)
-                for i, name in enumerate(param_names):
-                    p_single[name] = float(chunk[r, i])
+                _try_per_sim_params(
+                    p_single, chunk[r:r + 1], param_names,
+                    n_nodes=n_nodes,
+                )
                 try:
                     m_single = wc_cls(p_single)
                     m_single.prepare_input()

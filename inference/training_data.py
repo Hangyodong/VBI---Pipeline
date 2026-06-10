@@ -44,7 +44,9 @@ from inference._utils import _progress
 def collect_training_data(subjects, subject_data, prior_scaled,
                           theta_scaler, param_names, n_sim,
                           fixed_overrides=None, apply_bw=True,
-                          verbose=True, save_first_sample=False):
+                          verbose=True, save_first_sample=False,
+                          fc_selected_indices=None,
+                          engine="cubnm"):
     """Run simulations and extract features for the training set.
 
     When ``save_first_sample=True``, caches the first simulated BOLD
@@ -52,8 +54,46 @@ def collect_training_data(subjects, subject_data, prior_scaled,
     standard outputs plus ``diag_bold`` / ``diag_sid`` so a downstream
     diagnostic cell can plot without re-simulating. Returns the legacy
     4-tuple when ``save_first_sample=False`` (default).
+
+    ``engine`` selects the simulation backend (both expose the same
+    ``simulate_gpu_batch`` contract):
+      - ``"cubnm"`` (default) -> cuBNM WCVBISimGroup drop-in (~9.5x faster
+        at 10k sims).
+      - ``"vbi"`` / ``"gpu"`` -> the original cupy VBI engine.
     """
-    from simulator import simulate_gpu_batch, worker_extract
+    from simulator import worker_extract
+    eng = str(engine).lower()
+    if eng == "cubnm":
+        from cuBNM.simulate import simulate_gpu_batch  # cuBNM WCVBI (drop-in)
+    elif eng == "rwweib":
+        from cuBNM.simulate_rwweib import simulate_gpu_batch  # cuBNM RWW-EIB-FFI
+    elif eng in ("vbi", "gpu"):
+        from simulator import simulate_gpu_batch        # cupy VBI engine
+    else:
+        raise ValueError(
+            f"unknown simulation engine {engine!r}; "
+            "expected 'cubnm', 'rwweib', 'vbi', or 'gpu'."
+        )
+    if verbose:
+        print(f"  [Step 2] simulation engine: {eng}")
+
+    # Guard: the scaler (built at Step 7) and the current param_names
+    # (config.STAGE1_PARAMS) must describe the SAME parameters in the SAME
+    # order. A mismatch means prior_scaled / param_scaler are stale relative
+    # to the active config — sampling would silently mis-map theta columns
+    # (e.g. g_e values fed as c_ei) and later crash in report_step2. Fail
+    # loudly with an actionable message instead.
+    scaler_names = list(getattr(theta_scaler, "param_names", []) or [])
+    if scaler_names and scaler_names != list(param_names):
+        raise ValueError(
+            "Parameter mismatch between the Step 7 scaler and the current "
+            f"config: scaler={scaler_names} vs config.STAGE1_PARAMS="
+            f"{list(param_names)}. This usually means Step 7 (param scaler) "
+            "ran with a different config than the current Setup. Re-run "
+            "Step 7 — and this Step 2 — after the Setup cell so prior_scaled "
+            "matches config.STAGE1_PARAMS."
+        )
+
     import cupy as cp
 
     all_theta_s = []
@@ -166,6 +206,14 @@ def collect_training_data(subjects, subject_data, prior_scaled,
     theta_r = np.array(all_theta_r, dtype=np.float32)
     fc_raw = np.array(all_fc, dtype=np.float32)
     fcd_raw = np.array(all_fcd, dtype=np.float32)
+    if (
+        fc_selected_indices is not None
+        and fc_raw.ndim == 2
+        and fc_raw.shape[0] > 0
+    ):
+        idx = np.asarray(fc_selected_indices, dtype=np.int64)
+        if idx.size > 0 and idx.max() < fc_raw.shape[1]:
+            fc_raw = fc_raw[:, idx].astype(np.float32, copy=False)
 
     if verbose:
         # L5 — final summary (Task A).
@@ -229,13 +277,18 @@ def _drain_one_future(queued, all_theta_s, all_theta_r, all_fc, all_fcd):
 
 def step2_simulate_train(train_subjects, subject_data, prior_scaled,
                          param_scaler, n_sim=None, apply_bw=True,
-                         verbose=True, save_first_sample=False):
+                         verbose=True, save_first_sample=False,
+                         fc_selected_indices=None,
+                         engine="cubnm"):
     """Step 2. Simulate WC for the training set + sample features.
 
     Returns ``(theta_scaled, theta_raw, fc_raw, fcd_raw)`` by default.
     When ``save_first_sample=True``, returns a dict containing the same
     arrays plus ``diag_bold`` / ``diag_sid`` for downstream diagnostic
     plotting without re-simulation.
+
+    ``engine`` ('cubnm' default, or 'vbi'/'gpu') selects the simulation
+    backend; see :func:`collect_training_data`.
 
     Although the name says "simulate", FC/FCD extraction (step 3) is
     interleaved with simulation by design: BOLD outputs are streamed
@@ -269,6 +322,8 @@ def step2_simulate_train(train_subjects, subject_data, prior_scaled,
         apply_bw=apply_bw,
         verbose=verbose,
         save_first_sample=save_first_sample,
+        fc_selected_indices=fc_selected_indices,
+        engine=engine,
     )
     if isinstance(out, dict):
         theta_s = out["theta_scaled"]

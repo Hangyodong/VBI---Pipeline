@@ -33,6 +33,9 @@ def plot_posteriors(results, param_names, prior_low, prior_high,
     """Histogram of posterior samples per subject x parameter."""
     n_subj = len(results)
     n_p = len(param_names)
+    if n_subj == 0:
+        print("  [plot_posteriors] no subjects to plot (e.g. N_VAL=0) — skipped")
+        return
     fig, axes = plt.subplots(
         n_subj, n_p, figsize=(3 * n_p, 3 * n_subj), squeeze=False,
     )
@@ -71,6 +74,9 @@ def plot_posteriors(results, param_names, prior_low, prior_high,
 def plot_fc_comparison(results, save_path=None, title="FC comparison"):
     """Observed FC vs mean predicted FC, side-by-side per subject."""
     n_subj = len(results)
+    if n_subj == 0:
+        print("  [plot_fc_comparison] no subjects to plot — skipped")
+        return
     fig, axes = plt.subplots(
         n_subj, 2, figsize=(8, 4 * n_subj), squeeze=False,
     )
@@ -211,7 +217,7 @@ def plot_one_simulation(sid, subject_data, theta_raw=None, param_names=None,
     d = subject_data[sid]
 
     if bold is None:
-        from simulator import simulate_single
+        from cuBNM.simulate import simulate_single   # all sims via cuBNM
         if theta_raw is None or param_names is None:
             raise ValueError(
                 "plot_one_simulation: when bold is None, theta_raw and "
@@ -228,6 +234,7 @@ def plot_one_simulation(sid, subject_data, theta_raw=None, param_names=None,
         bold = bolds[0]
     else:
         bold = np.asarray(bold)
+        params = {}   # cached BOLD — no theta available
         print(f"  [one-sim plot] sid={sid}  (cached BOLD, no re-sim)")
 
     fc_sim = compute_fc(bold)

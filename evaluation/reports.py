@@ -181,12 +181,24 @@ def report_step2(theta_scaled, fc_raw, fcd_raw):
         return
 
     n_params = theta_scaled.shape[1]
+    names = list(config.STAGE1_PARAMS)
+    if n_params != len(names):
+        print()
+        print(f"  !! theta has {n_params} columns but config.STAGE1_PARAMS "
+              f"has {len(names)} ({names}).")
+        print("  !! prior_scaled / param_scaler is out of sync with the "
+              "current config.")
+        print("  !! Most common cause: Step 7 (parameter scaler) was run "
+              "before apply_species_config, or Setup was re-run after Step 7.")
+        print("  !! Fix: re-run Step 7 (and Step 2) after the Setup cell so "
+              "prior_scaled matches config.STAGE1_PARAMS.")
     fig, axes = plt.subplots(1, n_params, figsize=(3 * n_params, 3),
                              squeeze=False)
     for i in range(n_params):
+        label = names[i] if i < len(names) else f"param{i}"
         axes[0, i].hist(theta_scaled[:, i], bins=40,
                         color="steelblue", alpha=0.7)
-        axes[0, i].set_title(f"{config.STAGE1_PARAMS[i]} (scaled)")
+        axes[0, i].set_title(f"{label} (scaled)")
         axes[0, i].set_xlim(-1, 1)
     plt.suptitle("Step 2 - sampled theta distribution", fontsize=11)
     plt.tight_layout()
@@ -386,30 +398,6 @@ def report_step9(stage1_agg, baseline_agg):
                        stage1_agg["shrinkage_mean"]):
         mark = "OK" if s >= config.DIFFICULT_SHRINKAGE else "LOW"
         print(f"    {name:6s} : {float(s):.4f}  [{mark}]")
-
-
-def report_step10(difficult, val_shrinkage):
-    """Step 10 summary: which params go into Stage 2."""
-    print("\n" + "=" * 60)
-    print("  Step 10 result")
-    print("=" * 60)
-    print(f"  Shrinkage threshold : {config.DIFFICULT_SHRINKAGE}")
-    print(f"  Difficult params    : {difficult}")
-    print(f"  c-params to add     : "
-          f"{list(config.C_PARAM_PRIOR.keys())}")
-    print(f"  Stage 2 targets     : "
-          f"{difficult + list(config.C_PARAM_PRIOR.keys())}")
-
-
-def report_step11(s2):
-    """Step 11 summary: Stage 2 parameter targets."""
-    print("\n" + "=" * 60)
-    print("  Step 11 result")
-    print("=" * 60)
-    print(f"  Stage 2 params   : {s2['stage2_params']}")
-    print(f"  Nuisance params  : {s2['nuisance_params']}")
-    print(f"  theta_scaled     : {s2['theta_scaled'].shape}")
-    print(f"  x_input          : {s2['x_input'].shape}")
 
 
 def report_step12(stage2_agg):

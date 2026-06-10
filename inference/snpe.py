@@ -23,7 +23,6 @@ import numpy as np
 
 import config
 from inference._utils import _progress
-from inference.embedding import FeatureEmbedding
 from inference.feature_pipeline import FamilyScaler, FeaturePipeline
 from inference.priors import make_scaled_prior
 from inference.scaling import make_stage1_param_scaler
@@ -41,7 +40,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
-               proposal=None, verbose=True, fc_raw=None, sc_basis=None,
+               use_embedding=False,
+               proposal=None, verbose=True, fc_raw=None,
                sc_matrix=None):
     """Train SNPE-C jointly with the embedding network.
 
@@ -81,10 +81,10 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
     x_t = torch.tensor(x_input, dtype=torch.float32)
 
     if embedding_net is None:
-        if config.USE_EMBEDDING:
+        if use_embedding:
             from inference.embedding import make_embedding_net
             embedding_net = make_embedding_net(
-                config.EMBED_TYPE,
+                "region_transformer",
                 input_dim=x_input.shape[1],
                 out_dim=config.EMBED_DIM,
                 sc_matrix=sc_matrix,
@@ -94,7 +94,7 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
                 if p.requires_grad
             )
             _embed_desc = (
-                f"type={config.EMBED_TYPE}  input={x_input.shape[1]}"
+                f"type=region_transformer  input={x_input.shape[1]}"
                 f" -> out={config.EMBED_DIM}"
             )
         else:
@@ -102,8 +102,8 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
             embedding_net = nn.Identity()
             _n_params = 0
             _embed_desc = (
-                f"Identity — no embedding"
-                f" (MAF input={x_input.shape[1]})"
+                f"type=identity"
+                f"  FC raw({x_input.shape[1]}) -> MAF directly"
             )
     else:
         _n_params = sum(
@@ -111,9 +111,8 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
             if p.requires_grad
         )
         _embed_desc = (
-            f"input={x_input.shape[1]}"
-            f" -> [{config.EMBED_HIDDEN}->ReLU->Drop,"
-            f" {config.EMBED_DIM}]"
+            f"input={x_input.shape[1]} -> out={config.EMBED_DIM}"
+            f"  (pre-built embedding_net)"
         )
 
     density_estimator = posterior_nn(
@@ -163,12 +162,6 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
             f"                    device={config.SBI_DEVICE}  "
             f"(PCA frozen | MLP+MAF jointly trained)"
         )
-        if sc_basis is not None:
-            _sb = np.asarray(sc_basis)
-            print(
-                f"           sc_basis: shape={tuple(_sb.shape)}  "
-                f"dtype={_sb.dtype}"
-            )
 
     # Heartbeat: inferer.train() can run silently for many minutes.
     # Daemon thread prints a periodic alive-ping with the current epoch
@@ -293,9 +286,11 @@ def step4_fit_feature_scalers(fc_raw, fcd_raw, verbose=True):
 
 
 def step5_fit_feature_pipeline(fc_raw, fcd_raw, verbose=True):
-    """Step 5. Fit FC PCA (+ optional FCD scaler) on train simulations.
+    """Step 5. Fit the feature pipeline (raw FC passthrough + opt. FCD).
 
-    Progress is printed by FeaturePipeline / FCPCAScaler when verbose=True.
+    FC is passed through raw (no PCA); only an optional FCD z-score
+    scaler is fitted. Progress is printed by FeaturePipeline when
+    verbose=True.
     """
     if verbose:
         # E2 — Step 5 header.
@@ -305,13 +300,8 @@ def step5_fit_feature_pipeline(fc_raw, fcd_raw, verbose=True):
             f"fcd_raw={fcd_raw.shape}"
         )
         print(
-            f"           PCA_DIM_FC={config.PCA_DIM_FC}  "
+            f"           FC: raw passthrough (no PCA)  "
             f"USE_FCD={config.USE_FCD}"
-        )
-        # E3 — PCA start (wrap-around log just before pipeline.fit).
-        print(
-            f"  fitting FCPCAScaler: {fc_raw.shape} -> "
-            f"PCA(n={config.PCA_DIM_FC}) ..."
         )
     pipeline = FeaturePipeline()
     t_pca = time.time()
@@ -336,26 +326,10 @@ def step5_fit_feature_pipeline(fc_raw, fcd_raw, verbose=True):
     pipeline.fit(fc_raw, fcd_raw, verbose=verbose)
     pca_elapsed = time.time() - t_pca
     if verbose:
-        # E4 — PCA done. EVR pulled from the fitted sklearn PCA object;
-        # HC-11: graceful fallback if the attribute path is unavailable.
-        try:
-            evr = pipeline.fc_pca.pca.explained_variance_ratio_
-            n_comp = int(pipeline.fc_pca.pca.n_components_)
-            top5_str = "[" + ", ".join(
-                f"{float(v):.4f}" for v in evr[:5]
-            ) + "]"
-            cum = float(evr.sum())
-            _progress(
-                f"[Step 5] PCA done  {pca_elapsed:.2f} s  "
-                f"n_components={n_comp}"
-            )
-            print(f"           EVR top-5: {top5_str}")
-            print(f"           EVR cumulative: {cum:.4f}")
-        except Exception as exc:
-            _progress(
-                f"[Step 5] PCA done  {pca_elapsed:.2f} s  "
-                f"EVR: unavailable ({exc!r})"
-            )
+        _progress(
+            f"[Step 5] pipeline fit done  {pca_elapsed:.2f} s  "
+            f"(FC raw passthrough, dim={pipeline.fc_dim})"
+        )
     t_xf = time.time()
     x_input = pipeline.transform(fc_raw, fcd_raw)
     xf_elapsed = time.time() - t_xf
@@ -375,25 +349,15 @@ def step5_fit_feature_pipeline(fc_raw, fcd_raw, verbose=True):
 
 
 def step6_pca_diagnostic(pipeline, fc_raw, fcd_raw, verbose=True):
-    """Step 6. PCA quality check (pre-inference embedding quality)."""
+    """Step 6. Feature pipeline diagnostic (raw FC passthrough)."""
     if verbose:
-        _progress("[Step 6] PCA diagnostic")
+        _progress("[Step 6] feature diagnostic")
     pca_diag = pipeline.diagnostic(fc_raw, fcd_raw)
     if verbose:
-        _print_pca_diagnostic(pca_diag, header="Step 6 - PCA diagnostic")
-        # E6 — PASS/WARN summary derived from pca_diag dict.
         d_fc = pca_diag.get("fc_pca", {})
-        evr_sum = float(d_fc.get("explained_variance_sum", float("nan")))
-        recon = float(d_fc.get("recon_corr_train_mean", float("nan")))
-        evr_status = "PASS" if d_fc.get("pca_pass_evr") else "WARN"
-        recon_status = "PASS" if d_fc.get("pca_pass_recon") else "WARN"
         print(
-            f"           EVR @ threshold: {evr_sum:.4f}  "
-            f"(threshold={config.PCA_EVR_THRESHOLD:.2f}) {evr_status}"
-        )
-        print(
-            f"           recon corr: {recon:.4f}  "
-            f"(threshold={config.PCA_RECON_CORR_THRESH:.2f}) {recon_status}"
+            f"           FC: {d_fc.get('type', 'passthrough')}  "
+            f"dim={d_fc.get('n_components')}"
         )
         _progress("[Step 6] done")
     return pca_diag
@@ -403,10 +367,16 @@ def step7_fit_param_scaler(verbose=True):
     """Step 7. Build Stage 1 parameter scaler and scaled prior."""
     if verbose:
         print("\n  [Step 7] Parameter scaling ([-1, 1])")
+    n_p = len(config.STAGE1_PARAMS)
+    if not (n_p == len(config.STAGE1_PRIOR_LOW) == len(config.STAGE1_PRIOR_HIGH)):
+        raise ValueError(
+            "config inconsistency: STAGE1_PARAMS "
+            f"({n_p}) / STAGE1_PRIOR_LOW ({len(config.STAGE1_PRIOR_LOW)}) / "
+            f"STAGE1_PRIOR_HIGH ({len(config.STAGE1_PRIOR_HIGH)}) lengths "
+            "differ. Check the active species config (apply_species_config)."
+        )
     param_scaler = make_stage1_param_scaler()
-    prior_scaled = make_scaled_prior(
-        len(config.STAGE1_PARAMS), device=config.SBI_DEVICE,
-    )
+    prior_scaled = make_scaled_prior(n_p, device=config.SBI_DEVICE)
     if verbose:
         for name, lo, hi in zip(config.STAGE1_PARAMS,
                                 config.STAGE1_PRIOR_LOW,
@@ -416,13 +386,15 @@ def step7_fit_param_scaler(verbose=True):
 
 
 def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
-                     fc_raw=None, sc_basis=None, sc_matrix=None):
+                     fc_raw=None, use_embedding=False,
+                     sc_matrix=None):
     """Step 8. Train single-round amortized SNPE-C."""
     t_step8 = time.time()
     posterior, embedding_net = train_snpe(
         theta_scaled, x_input, prior_scaled,
-        embedding_net=None, proposal=None, verbose=verbose,
-        fc_raw=fc_raw, sc_basis=sc_basis, sc_matrix=sc_matrix,
+        embedding_net=None, use_embedding=use_embedding,
+        proposal=None, verbose=verbose,
+        fc_raw=fc_raw, sc_matrix=sc_matrix,
     )
     # E12 — Step 8 summary: total elapsed + posterior + embedding device.
     if verbose:
@@ -431,16 +403,21 @@ def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
         except Exception:
             emb_device = config.SBI_DEVICE
         in_dim = int(x_input.shape[1])
-        hidden = config.EMBED_HIDDEN
         out_dim = config.EMBED_DIM
         _progress(f"[Step 8] done  {time.time() - t_step8:.2f} s")
         print(
             f"           posterior: SNPE-C  device={config.SBI_DEVICE}"
         )
-        print(
-            f"           embedding: FeatureEmbedding("
-            f"{in_dim}->{hidden}->{hidden // 2}->{out_dim})"
-        )
+        if use_embedding:
+            print(
+                f"           embedding: RegionTransformer("
+                f"{in_dim}->{out_dim})"
+            )
+        else:
+            print(
+                f"           embedding: identity  "
+                f"(raw FC {in_dim} -> MAF)"
+            )
         print(f"                      device={emb_device}")
     return posterior, embedding_net
 
