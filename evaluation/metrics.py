@@ -199,7 +199,8 @@ def _resimulate_and_score(n_resim, samples_raw, param_names,
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
     )
-    from cuBNM.simulate import simulate_gpu_batch   # all sims via cuBNM
+    from engine_select import get_simulate_gpu_batch  # honor INFERENCE_MODEL
+    simulate_gpu_batch = get_simulate_gpu_batch()
 
     fc_corrs, fc_rmses, fcd_rmses, fc_preds = [], [], [], []
     t_resim = time.time()
@@ -268,7 +269,8 @@ def baseline_eval(sid, subject_data, n_resim=10, apply_bw=True,
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
         extract_observed_features,
     )
-    from cuBNM.simulate import simulate_single   # all sims via cuBNM
+    from engine_select import get_simulate_single  # honor INFERENCE_MODEL
+    simulate_single = get_simulate_single()
 
     d = subject_data[sid]
     fc_obs_full = d["fc"]

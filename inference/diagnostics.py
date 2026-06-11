@@ -48,7 +48,8 @@ def simulation_based_calibration(posterior, prior_scaled, param_scaler,
         compute_fc, compute_sim_fcd_matrix, fc_to_upper_tri,
         fcd_to_upper_tri,
     )
-    from cuBNM.simulate import simulate_gpu_batch   # all sims via cuBNM
+    from engine_select import get_simulate_gpu_batch  # honor INFERENCE_MODEL
+    simulate_gpu_batch = get_simulate_gpu_batch()
 
     n_sbc = n_sbc or config.N_SBC
     n_posterior = n_posterior or 1000

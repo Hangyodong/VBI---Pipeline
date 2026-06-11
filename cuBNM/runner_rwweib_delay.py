@@ -1,12 +1,12 @@
-"""Runner for the RWW-EIB-FFI cuBNM model (``RWWEIBSimGroup``).
+"""Runner for the RWW-EIB-FFI + tract-length DELAY cuBNM model (``RWWEIB_DELAYSimGroup``).
 
 Mirrors ``cuBNM/runner_vbi.py`` but drives the custom ``RWWEIB`` model defined
-in ``cuBNM/rww_eib.yaml`` — VBI-based Reduced Wong-Wang E/I with
+in ``cuBNM/rww_eib_delay.yaml`` — VBI-based Reduced Wong-Wang E/I with
 excitatory-driven feedforward inhibition (single connectome coupling
 ``globalinput = SC @ S_e`` feeds both populations with independent gains
 ``g_LRE`` and ``g_FFI``).
 
-``RWWEIBSimGroup`` only exists after ``cuBNM/rww_eib.yaml`` has been fed through
+``RWWEIB_DELAYSimGroup`` only exists after ``cuBNM/rww_eib_delay.yaml`` has been fed through
 the upstream cuBNM codegen driver and the extension rebuilt from source. The
 installed 0.1.0 wheel does NOT ship that codegen driver, so until the model is
 generated+built this module raises ``ModelNotBuiltError`` (see BUILD_RWWEIB.md).
@@ -24,15 +24,15 @@ import numpy as np
 
 
 class ModelNotBuiltError(RuntimeError):
-    """Raised when RWWEIBSimGroup is not yet generated + compiled into cubnm."""
+    """Raised when RWWEIB_DELAYSimGroup is not yet generated + compiled into cubnm."""
 
 
-# RWWEIB regional params + fallback defaults (mirror cuBNM/rww_eib.yaml).
+# RWWEIB regional params + fallback defaults (mirror cuBNM/rww_eib_delay.yaml).
 # config.RWWEIB_FIXED overrides these; the 3 inferred params (g_LRE/g_FFI/sigma)
 # are filled from theta when present, else fall back to these defaults.
 # g_LRE is the model's single global_param (shape (n_sims,)); everything else is
 # a regional_param (shape (n_sims, nodes)). Other params are compile-time
-# constants in rww_eib.yaml. Inferred: g_LRE (global) + g_FFI/sigma/I_o
+# constants in rww_eib_delay.yaml. Inferred: g_LRE (global) + g_FFI/sigma/I_o
 # (regional). Fixed regional: w_p/J_N/J_i.
 _GLOBAL_DEFAULT = {"g_LRE": 1.0}
 _RWWEIB_REGIONAL_DEFAULT = {
@@ -45,14 +45,14 @@ _INFERRED = ("g_FFI", "sigma", "I_o")
 
 
 def _import_rwweib():
-    """Import RWWEIBSimGroup or raise a clear, actionable error."""
+    """Import RWWEIB_DELAYSimGroup or raise a clear, actionable error."""
     try:
-        from cubnm.sim import RWWEIBSimGroup  # generated class
-        return RWWEIBSimGroup
+        from cubnm.sim import RWWEIB_DELAYSimGroup  # generated class
+        return RWWEIB_DELAYSimGroup
     except Exception as e:  # noqa: BLE001
         raise ModelNotBuiltError(
-            "RWWEIBSimGroup is not available in the installed cubnm. Generate it "
-            "from cuBNM/rww_eib.yaml with the upstream cuBNM codegen driver, then "
+            "RWWEIB_DELAYSimGroup is not available in the installed cubnm. Generate it "
+            "from cuBNM/rww_eib_delay.yaml with the upstream cuBNM codegen driver, then "
             "rebuild the extension from source with --no-build-isolation "
             "(see cuBNM/BUILD_RWWEIB.md). "
             f"Underlying import error: {type(e).__name__}: {e}"
@@ -75,7 +75,7 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
     """
     import config
 
-    rwweib_fixed = dict(getattr(config, "RWWEIB_FIXED", {}) or {})
+    rwweib_fixed = dict(getattr(config, "RWWEIB_DELAY_FIXED", {}) or {})
     if fixed:
         for k, v in dict(fixed).items():
             if k in _RWWEIB_REGIONAL_DEFAULT:
@@ -110,23 +110,11 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
     if g_lre is None:
         g_lre = np.full(n_sims, _GLOBAL_DEFAULT["g_LRE"], dtype=np.float64)
 
-    # P8: reparam r_FFI = g_FFI / g_LRE  ->  g_FFI = g_LRE * r_FFI (per-sim).
-    # The two long-range gains both scale the SAME globalinput (SC @ S_E), so
-    # inferring them independently is ill-conditioned (degenerate ridge).
-    # Inferring the ratio instead aligns the degeneracy axis with one param.
-    # Overrides the g_FFI default/column set above. No-op if 'r_FFI' absent.
-    r_ffi = _theta_column(theta, pn, "r_FFI")
-    if r_ffi is not None:
-        g_ffi = g_lre * r_ffi
-        param_lists["g_FFI"] = np.ascontiguousarray(
-            np.repeat(g_ffi[:, None], n_nodes, axis=1), dtype=np.float64
-        )
-
     param_lists["g_LRE"] = np.ascontiguousarray(g_lre, dtype=np.float64)
     return param_lists
 
 
-def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
+def run_cubnm_rwweib_delay_batch(weights, theta_batch, param_names,
                            duration_s=None, tr_s=None, dt_ms=None,
                            fixed=None, force_gpu=True, sim_seed=42,
                            burn_in_s=None, hrf="bw",
@@ -140,7 +128,7 @@ def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
                  to the cupy VBI engine.
     Returns list[np.ndarray] — one (T, N) BOLD array per simulation.
     """
-    RWWEIBSimGroup = _import_rwweib()
+    RWWEIB_DELAYSimGroup = _import_rwweib()
     import config
 
     if duration_s is None:
@@ -168,7 +156,7 @@ def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
     use_vbi_hrf = (str(hrf).lower() == "vbi")
     neural_dt_ms = float(config.DT) * float(config.DECIMATE)
 
-    grp = RWWEIBSimGroup(
+    grp = RWWEIB_DELAYSimGroup(
         duration=float(duration_s),
         TR=float(tr_s),
         sc=weights,
@@ -204,7 +192,7 @@ def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
     from bold import BoldMonitor  # repo-root module (read-only use)
 
     # sim_states['S_E'] shape (N_sims, T_neural, nodes); full (un-trimmed) series.
-    # NOTE: key is 'S_E' (RWWEIBSimGroup.state_names), not 'S_e' -> prior 'S_e' KeyError'd.
+    # NOTE: key is 'S_E' (RWWEIB_DELAYSimGroup.state_names), not 'S_e' -> prior 'S_e' KeyError'd.
     Se = np.asarray(grp.sim_states["S_E"], dtype=np.float32)  # (S, T, N)
     n_steps = Se.shape[1]
     mon = BoldMonitor(

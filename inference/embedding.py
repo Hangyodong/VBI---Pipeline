@@ -117,7 +117,7 @@ class RegionTransformerEmbedding(_EMBED_BASE):
     def __init__(self, input_dim, out_dim=None, n_regions=None,
                  d_model=None, n_heads=None, n_layers=None,
                  sc_matrix=None, triu_indices=None,
-                 use_mask=False):
+                 use_mask=False, sc_table=None, per_subject_sc=False):
         if not _TORCH_AVAILABLE:
             raise ImportError("torch is required for RegionTransformerEmbedding")
         super().__init__()
@@ -163,7 +163,30 @@ class RegionTransformerEmbedding(_EMBED_BASE):
 
         self.token_proj = nn.Linear(token_input_dim, self.d_model)
 
-        if sc_matrix is not None:
+        # ── Per-subject SC conditioning (④) ──────────────────────────────
+        # When per_subject_sc is on, the SC positional encoding is selected
+        # PER SAMPLE instead of a single fixed matrix. The forward input x then
+        # carries a leading subject-index column: x = [subj_idx | fc_vec].
+        #   - train: subj_idx -> row of the registered sc_table (one per subject)
+        #   - eval : set self.override_sc to the test subject's SC (broadcast to
+        #            the whole batch); subj_idx is then ignored.
+        # This gives true amortization over subjects with different SC, instead
+        # of a constant bias. Storage is cheap: sc_table is (n_subj, N, N).
+        self.per_subject_sc = bool(per_subject_sc)
+        self.override_sc = None     # set at eval time to a (N, N) tensor
+        if self.per_subject_sc:
+            if sc_table is None:
+                raise ValueError("per_subject_sc=True requires sc_table (n_subj, N, N)")
+            sct = torch.tensor(np.asarray(sc_table, dtype=np.float32), dtype=torch.float32)
+            if sct.ndim != 3 or sct.shape[1:] != (self.n_regions, self.n_regions):
+                raise ValueError(
+                    f"sc_table shape {tuple(sct.shape)} != (n_subj, "
+                    f"{self.n_regions}, {self.n_regions})"
+                )
+            self.register_buffer("sc_table", sct)
+            self.sc_matrix = None
+            self.sc_proj = nn.Linear(self.n_regions, self.d_model)
+        elif sc_matrix is not None:
             sc_t = torch.tensor(
                 np.asarray(sc_matrix, dtype=np.float32),
                 dtype=torch.float32,
@@ -226,8 +249,13 @@ class RegionTransformerEmbedding(_EMBED_BASE):
         return val, msk
 
     def forward(self, x):
-        # x: (B, input_dim)
+        # x: (B, input_dim)  — or (B, 1 + input_dim) when per_subject_sc
+        # (leading column = subject index into sc_table).
         B = x.shape[0]
+        subj_idx = None
+        if self.per_subject_sc:
+            subj_idx = x[:, 0].long()                # (B,)
+            x = x[:, 1:]                             # strip index -> (B, input_dim)
         if self.use_mask:
             val_mat, msk_mat = self._scatter_to_matrix_with_mask(x)
             combined = torch.cat([val_mat, msk_mat], dim=2)  # (B,N,2N)
@@ -235,7 +263,15 @@ class RegionTransformerEmbedding(_EMBED_BASE):
         else:
             mat = self._scatter_to_matrix(x)             # (B, N, N)
             tok = self.token_proj(mat)                   # (B, N, d_model)
-        if self.sc_proj is not None:
+        if self.per_subject_sc:
+            if self.override_sc is not None:
+                # eval: one subject for the whole batch
+                sc_sel = self.override_sc.to(tok.dtype).to(tok.device)
+                sc_sel = sc_sel.unsqueeze(0).expand(B, -1, -1)   # (B,N,N)
+            else:
+                sc_sel = self.sc_table[subj_idx]                 # (B,N,N) per-sample
+            tok = tok + self.sc_proj(sc_sel)                     # (B,N,d_model)
+        elif self.sc_proj is not None:
             sc_pe = self.sc_proj(self.sc_matrix)     # (N, d_model)
             tok = tok + sc_pe.unsqueeze(0)
         cls = self.cls.expand(B, -1, -1)             # (B, 1, d_model)

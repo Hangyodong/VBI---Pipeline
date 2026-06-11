@@ -136,7 +136,8 @@ def posterior_predictive_check(sid, subject_data, posterior,
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
     )
-    from cuBNM.simulate import simulate_single   # all sims via cuBNM
+    from engine_select import get_simulate_single  # honor INFERENCE_MODEL
+    simulate_single = get_simulate_single()
 
     n_predictive = n_predictive or config.N_PPC
     d = subject_data[sid]

@@ -1,60 +1,68 @@
-"""Runner for the RWW-EIB-FFI cuBNM model (``RWWEIBSimGroup``).
+"""Runner for the RWW-EIB two-coupling cuBNM model (``RWWEIB_2CPLSimGroup``).
 
-Mirrors ``cuBNM/runner_vbi.py`` but drives the custom ``RWWEIB`` model defined
-in ``cuBNM/rww_eib.yaml`` — VBI-based Reduced Wong-Wang E/I with
-excitatory-driven feedforward inhibition (single connectome coupling
-``globalinput = SC @ S_e`` feeds both populations with independent gains
-``g_LRE`` and ``g_FFI``).
+Mirrors ``cuBNM/runner_rwweib.py`` but drives the TWO-connectome-coupling model
+defined in ``cuBNM/rww_eib_2cpl.yaml`` — VBI-based Reduced Wong-Wang E/I with two
+independent connectome couplings (the equation-literal full WW):
 
-``RWWEIBSimGroup`` only exists after ``cuBNM/rww_eib.yaml`` has been fed through
-the upstream cuBNM codegen driver and the extension rebuilt from source. The
-installed 0.1.0 wheel does NOT ship that codegen driver, so until the model is
-generated+built this module raises ``ModelNotBuiltError`` (see BUILD_RWWEIB.md).
+    globalinput_E = SC @ S_E   (long-range excitation,  gain g_LRE)
+    globalinput_I = SC @ S_I   (long-range I-coupling,  gain g_FFI * lambda_IE)
 
-Parameter mapping (VBI theta / RWWEIB_FIXED  ->  RWWEIB regional param):
-  inferred  g_LRE -> g_LRE   (regional, per-sim scalar broadcast to all nodes)
+Unlike the single-coupling FFI variant (``runner_rwweib.py``), here the I
+population is driven by ``SC @ S_I`` (its own conn_state_var), NOT by the shared
+``SC @ S_E``. This requires the cuBNM codegen to support ``conn_state_vars:
+[S_E, S_I]`` (two global-input arrays). If your cubnm build's codegen only
+supports a single coupling, this model cannot be generated — see
+``cuBNM/cubnm_build`` / BUILD notes and verify codegen multi-coupling support
+BEFORE building.
+
+``RWWEIB_2CPLSimGroup`` only exists after ``cuBNM/rww_eib_2cpl.yaml`` is fed
+through the upstream cuBNM codegen driver and the extension rebuilt from source.
+
+Parameter mapping (theta / RWWEIB2_FIXED  ->  RWWEIB_2CPL param):
+  inferred  g_LRE -> g_LRE   (global, per-sim scalar)
   inferred  g_FFI -> g_FFI   (regional, per-sim scalar broadcast to all nodes)
   inferred  sigma -> sigma   (regional, per-sim scalar broadcast to all nodes)
-  fixed     RWWEIB_FIXED[k]  -> regional param k (broadcast to all nodes)
-All params are regional; the model declares NO global_param (the long-range
-gain is applied in step_equations as ``g_LRE * J_N * globalinput``).
+  inferred  I_o   -> I_o     (regional, per-sim scalar broadcast to all nodes)
+  fixed     RWWEIB2_FIXED[k] -> regional param k (broadcast to all nodes)
+
+The two long-range gains drive DIFFERENT couplings (SC@S_E vs SC@S_I), so they
+are inferred directly and independently (no r_FFI reparam — that workaround was
+for the single-coupling FFI model where both gains scaled the same globalinput).
+NO FIC: J_i is a fixed regional param, not FIC-tuned.
 """
 
 import numpy as np
 
 
 class ModelNotBuiltError(RuntimeError):
-    """Raised when RWWEIBSimGroup is not yet generated + compiled into cubnm."""
+    """Raised when RWWEIB_2CPLSimGroup is not yet generated + compiled into cubnm."""
 
 
-# RWWEIB regional params + fallback defaults (mirror cuBNM/rww_eib.yaml).
-# config.RWWEIB_FIXED overrides these; the 3 inferred params (g_LRE/g_FFI/sigma)
-# are filled from theta when present, else fall back to these defaults.
+# RWWEIB_2CPL params + fallback defaults (mirror cuBNM/rww_eib_2cpl.yaml).
 # g_LRE is the model's single global_param (shape (n_sims,)); everything else is
-# a regional_param (shape (n_sims, nodes)). Other params are compile-time
-# constants in rww_eib.yaml. Inferred: g_LRE (global) + g_FFI/sigma/I_o
-# (regional). Fixed regional: w_p/J_N/J_i.
+# a regional_param (shape (n_sims, nodes)). Inferred: g_LRE (global) +
+# g_FFI/sigma/I_o (regional). Fixed regional: w_p/J_N/J_i/lambda_IE.
 _GLOBAL_DEFAULT = {"g_LRE": 1.0}
-_RWWEIB_REGIONAL_DEFAULT = {
+_RWWEIB2_REGIONAL_DEFAULT = {
     "g_FFI": 1.0, "sigma": 0.01, "I_o": 0.382,
-    "w_p": 1.4, "J_N": 0.15, "J_i": 1.0,
+    "w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0,
 }
 
 # Inferred regional theta columns (g_LRE handled separately as global).
 _INFERRED = ("g_FFI", "sigma", "I_o")
 
 
-def _import_rwweib():
-    """Import RWWEIBSimGroup or raise a clear, actionable error."""
+def _import_rwweib2():
+    """Import RWWEIB_2CPLSimGroup or raise a clear, actionable error."""
     try:
-        from cubnm.sim import RWWEIBSimGroup  # generated class
-        return RWWEIBSimGroup
+        from cubnm.sim import RWWEIB_2CPLSimGroup  # generated class
+        return RWWEIB_2CPLSimGroup
     except Exception as e:  # noqa: BLE001
         raise ModelNotBuiltError(
-            "RWWEIBSimGroup is not available in the installed cubnm. Generate it "
-            "from cuBNM/rww_eib.yaml with the upstream cuBNM codegen driver, then "
-            "rebuild the extension from source with --no-build-isolation "
-            "(see cuBNM/BUILD_RWWEIB.md). "
+            "RWWEIB_2CPLSimGroup is not available in the installed cubnm. Generate "
+            "it from cuBNM/rww_eib_2cpl.yaml with the upstream cuBNM codegen driver "
+            "(requires conn_state_vars=[S_E, S_I] / two-coupling support), then "
+            "rebuild the extension from source with --no-build-isolation. "
             f"Underlying import error: {type(e).__name__}: {e}"
         ) from e
 
@@ -66,28 +74,28 @@ def _theta_column(theta, pn, name):
 
 
 def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
-    """Build RWWEIB ``param_lists`` {name: (n_sims, n_nodes) float64}.
+    """Build RWWEIB_2CPL ``param_lists`` {name: (n_sims, n_nodes) float64}.
 
     Every regional param is set explicitly. Fixed defaults come from
-    ``config.RWWEIB_FIXED`` (falling back to ``_RWWEIB_REGIONAL_DEFAULT``);
-    the inferred g_LRE/g_FFI/sigma are taken per-sim from ``theta_batch`` and
-    broadcast to all nodes.
+    ``config.RWWEIB2_FIXED`` (falling back to ``_RWWEIB2_REGIONAL_DEFAULT``);
+    the inferred g_FFI/sigma/I_o are taken per-sim from ``theta_batch`` and
+    broadcast to all nodes. g_LRE is the per-sim global scalar.
     """
     import config
 
-    rwweib_fixed = dict(getattr(config, "RWWEIB_FIXED", {}) or {})
+    rwweib2_fixed = dict(getattr(config, "RWWEIB2_FIXED", {}) or {})
     if fixed:
         for k, v in dict(fixed).items():
-            if k in _RWWEIB_REGIONAL_DEFAULT:
-                rwweib_fixed[k] = v
+            if k in _RWWEIB2_REGIONAL_DEFAULT:
+                rwweib2_fixed[k] = v
 
     theta = np.asarray(theta_batch, dtype=np.float64)
     n_sims = theta.shape[0]
     pn = list(param_names)
 
-    # Start from yaml defaults, overlay config.RWWEIB_FIXED.
-    regional = dict(_RWWEIB_REGIONAL_DEFAULT)
-    for k, v in rwweib_fixed.items():
+    # Start from yaml defaults, overlay config.RWWEIB2_FIXED.
+    regional = dict(_RWWEIB2_REGIONAL_DEFAULT)
+    for k, v in rwweib2_fixed.items():
         if k in regional:
             regional[k] = float(v)
 
@@ -109,38 +117,25 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
     g_lre = _theta_column(theta, pn, "g_LRE")
     if g_lre is None:
         g_lre = np.full(n_sims, _GLOBAL_DEFAULT["g_LRE"], dtype=np.float64)
-
-    # P8: reparam r_FFI = g_FFI / g_LRE  ->  g_FFI = g_LRE * r_FFI (per-sim).
-    # The two long-range gains both scale the SAME globalinput (SC @ S_E), so
-    # inferring them independently is ill-conditioned (degenerate ridge).
-    # Inferring the ratio instead aligns the degeneracy axis with one param.
-    # Overrides the g_FFI default/column set above. No-op if 'r_FFI' absent.
-    r_ffi = _theta_column(theta, pn, "r_FFI")
-    if r_ffi is not None:
-        g_ffi = g_lre * r_ffi
-        param_lists["g_FFI"] = np.ascontiguousarray(
-            np.repeat(g_ffi[:, None], n_nodes, axis=1), dtype=np.float64
-        )
-
     param_lists["g_LRE"] = np.ascontiguousarray(g_lre, dtype=np.float64)
+
     return param_lists
 
 
-def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
-                           duration_s=None, tr_s=None, dt_ms=None,
-                           fixed=None, force_gpu=True, sim_seed=42,
-                           burn_in_s=None, hrf="bw",
-                           sc_dist=None, velocity=None):
-    """Run an RWWEIB batch — same signature/return as runner_vbi.run_cubnm_batch.
+def run_cubnm_rwweib2_batch(weights, theta_batch, param_names,
+                            duration_s=None, tr_s=None, dt_ms=None,
+                            fixed=None, force_gpu=True, sim_seed=42,
+                            burn_in_s=None, hrf="bw",
+                            sc_dist=None, velocity=None):
+    """Run an RWWEIB_2CPL batch — same signature/return as runner_rwweib.
 
     hrf : {"bw", "vbi"}
         "bw"  -> cuBNM built-in Balloon-Windkessel BOLD (fast).
-        "vbi" -> take the neural S_e series and convolve with VBI's exact
-                 MixtureOfGammas HRF (bold.BoldMonitor), identical BOLD model
-                 to the cupy VBI engine.
+        "vbi" -> take the neural S_E series and convolve with VBI's exact
+                 MixtureOfGammas HRF (bold.BoldMonitor).
     Returns list[np.ndarray] — one (T, N) BOLD array per simulation.
     """
-    RWWEIBSimGroup = _import_rwweib()
+    RWWEIB_2CPLSimGroup = _import_rwweib2()
     import config
 
     if duration_s is None:
@@ -168,7 +163,7 @@ def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
     use_vbi_hrf = (str(hrf).lower() == "vbi")
     neural_dt_ms = float(config.DT) * float(config.DECIMATE)
 
-    grp = RWWEIBSimGroup(
+    grp = RWWEIB_2CPLSimGroup(
         duration=float(duration_s),
         TR=float(tr_s),
         sc=weights,
@@ -200,11 +195,10 @@ def run_cubnm_rwweib_batch(weights, theta_batch, param_names,
             return [np.ascontiguousarray(sim_bold[i]) for i in range(sim_bold.shape[0])]
         return [np.ascontiguousarray(sim_bold.reshape(-1, n_nodes))]
 
-    # ── VBI MixtureOfGammas HRF on cuBNM neural S_e ───────────────────────
+    # ── VBI MixtureOfGammas HRF on cuBNM neural S_E ───────────────────────
     from bold import BoldMonitor  # repo-root module (read-only use)
 
     # sim_states['S_E'] shape (N_sims, T_neural, nodes); full (un-trimmed) series.
-    # NOTE: key is 'S_E' (RWWEIBSimGroup.state_names), not 'S_e' -> prior 'S_e' KeyError'd.
     Se = np.asarray(grp.sim_states["S_E"], dtype=np.float32)  # (S, T, N)
     n_steps = Se.shape[1]
     mon = BoldMonitor(

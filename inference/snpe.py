@@ -42,7 +42,7 @@ except ImportError:
 def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
                use_embedding=False,
                proposal=None, verbose=True, fc_raw=None,
-               sc_matrix=None):
+               sc_matrix=None, sc_table=None, per_subject_sc=False):
     """Train SNPE-C jointly with the embedding network.
 
     Works with sbi 0.22+ where ``posterior_nn`` moved from
@@ -83,11 +83,16 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
     if embedding_net is None:
         if use_embedding:
             from inference.embedding import make_embedding_net
+            # ④: per_subject_sc -> x carries a leading subject-index column, so
+            # the FC width (triu length) is one less than x_input.shape[1].
+            _fc_dim = x_input.shape[1] - (1 if per_subject_sc else 0)
             embedding_net = make_embedding_net(
                 "region_transformer",
-                input_dim=x_input.shape[1],
+                input_dim=_fc_dim,
                 out_dim=config.EMBED_DIM,
                 sc_matrix=sc_matrix,
+                sc_table=sc_table,
+                per_subject_sc=per_subject_sc,
             )
             _n_params = sum(
                 p.numel() for p in embedding_net.parameters()
@@ -135,7 +140,14 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
         except Exception:
             pass
 
-    inferer.append_simulations(theta_t, x_t, proposal=proposal)
+    # Keep the full (N, FC_DIM) dataset on CPU — for HCP raw-FC passthrough
+    # x is (160k, 72390) ~46 GB in fp32, which OOMs if moved to GPU wholesale
+    # (incl. handle_invalid_x's isinf bool copy). sbi streams mini-batches to
+    # the training device instead.
+    _data_device = "cpu" if config.SBI_DEVICE == "cuda" else config.SBI_DEVICE
+    inferer.append_simulations(
+        theta_t, x_t, proposal=proposal, data_device=_data_device
+    )
 
     # ---- E7 / E8 — training-config + architecture banner ------------------
     _train_batch = 512        # 2048 → 512 (정규화 효과 / 과적합 완화)
@@ -387,7 +399,7 @@ def step7_fit_param_scaler(verbose=True):
 
 def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
                      fc_raw=None, use_embedding=False,
-                     sc_matrix=None):
+                     sc_matrix=None, sc_table=None, per_subject_sc=False):
     """Step 8. Train single-round amortized SNPE-C."""
     t_step8 = time.time()
     posterior, embedding_net = train_snpe(
@@ -395,6 +407,7 @@ def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
         embedding_net=None, use_embedding=use_embedding,
         proposal=None, verbose=verbose,
         fc_raw=fc_raw, sc_matrix=sc_matrix,
+        sc_table=sc_table, per_subject_sc=per_subject_sc,
     )
     # E12 — Step 8 summary: total elapsed + posterior + embedding device.
     if verbose:

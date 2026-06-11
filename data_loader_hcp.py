@@ -74,10 +74,13 @@ def load_raw_data():
         f"(N_REGIONS={n}); set N_REGIONS=381 for HCP."
     )
     fc0 = np.asarray(C[0, config.FC_COL])
-    assert fc0.shape == (n, n), (
-        f"HCP FC matrix is {fc0.shape}, but N_REGIONS={n}. "
-        f"Set PipelineConfig(N_REGIONS={fc0.shape[0]})."
+    # cortical-only: raw file may be larger than N_REGIONS (e.g. 381 raw vs 360
+    # cortical); _cortical_slice keeps the first N_REGIONS. Require raw >= n.
+    assert fc0.shape[0] >= n and fc0.shape[0] == fc0.shape[1], (
+        f"HCP FC matrix is {fc0.shape}, need square with size >= N_REGIONS={n}."
     )
+    if fc0.shape[0] > n:
+        print(f"  [cortical-only] slicing raw FC/SC {fc0.shape[0]} -> first {n} regions")
     print(f"  FC: {C.shape[0]} subjects x {fc0.shape} (FC col {config.FC_COL}, no FCD)")
     print(f"  SC: {len(sc_ids)} subjects (v7.3; weights col 1, lengths col 2)")
     return None, C, config.SC_PATH, fc_ids, sc_ids, None, None
@@ -99,10 +102,24 @@ def get_target_subjects(df, fc_ids, sc_ids):
     return targets
 
 
+def _cortical_slice(mat, n):
+    """Cortical-only: keep the first ``n`` regions (drop trailing subcortical).
+
+    HCP 381 = 360 Glasser cortical + 21 subcortical (last 21). The subcortical
+    nodes are SC hubs but FC-weak (deep, low-SNR BOLD), which depresses SC-FC
+    correspondence. Setting N_REGIONS=360 slices them off. No-op if mat is
+    already <= n.
+    """
+    if mat.shape[0] > n:
+        return mat[:n, :n]
+    return mat
+
+
 def _build_subject_data(sid, fc_mat, fc_index, h5f, sc_refs, sc_index, n):
     """Bundle FC / SC / lengths / delays for one HCP subject."""
     # ---- FC (scipy C, col config.FC_COL) ----
-    fc_raw = np.asarray(fc_mat[fc_index[sid], config.FC_COL]).astype(np.float64)
+    fc_raw = _cortical_slice(
+        np.asarray(fc_mat[fc_index[sid], config.FC_COL]).astype(np.float64), n)
     assert fc_raw.shape == (n, n), f"{sid}: FC shape {fc_raw.shape} != ({n},{n})"
     fc_nan = np.isnan(fc_raw)
     fc = np.nan_to_num(fc_raw, nan=0.0)
@@ -114,12 +131,12 @@ def _build_subject_data(sid, fc_mat, fc_index, h5f, sc_refs, sc_index, n):
 
     # ---- SC weights (row 1) + tract lengths (row 2), h5py deref ----
     col = sc_index[sid]
-    w_raw = np.asarray(h5f[sc_refs[1, col]][()]).astype(np.float64)
+    w_raw = _cortical_slice(np.asarray(h5f[sc_refs[1, col]][()]).astype(np.float64), n)
     assert w_raw.shape == (n, n), f"{sid}: SC weight shape {w_raw.shape}"
     sc = (w_raw + w_raw.T) / 2.0
     sc = _scale_weights(sc).astype(np.float64)
 
-    len_raw = np.asarray(h5f[sc_refs[2, col]][()]).astype(np.float64)
+    len_raw = _cortical_slice(np.asarray(h5f[sc_refs[2, col]][()]).astype(np.float64), n)
     assert len_raw.shape == (n, n), f"{sid}: SC length shape {len_raw.shape}"
     lengths_mm = (len_raw + len_raw.T) / 2.0
     np.fill_diagonal(lengths_mm, 0.0)
@@ -135,12 +152,35 @@ def _build_subject_data(sid, fc_mat, fc_index, h5f, sc_refs, sc_index, n):
     }
 
 
+def _compute_group_fc(fc_mat, fc_ids, n):
+    """Group-averaged FC (cortical-sliced) over ALL HCP subjects.
+
+    Per-subject FC is noisy -> SC-FC correspondence ~0.05. Averaging across
+    subjects cancels idiosyncratic noise and reveals the shared SC-shaped
+    structure (group SC-FC ~0.18). Using the group FC as the inference target
+    raises the achievable ceiling for an SC-driven model.
+    """
+    acc = np.zeros((n, n), dtype=np.float64)
+    cnt = 0
+    for i in range(len(fc_ids)):
+        m = _cortical_slice(np.asarray(fc_mat[i, config.FC_COL]).astype(np.float64), n)
+        m = np.nan_to_num(m, nan=0.0)
+        m = (m + m.T) / 2.0
+        np.fill_diagonal(m, 0.0)
+        acc += m
+        cnt += 1
+    return acc / max(cnt, 1)
+
+
 def load_all_subjects(subjects, fc_mat, sc_mat, fc_ids, sc_ids,
                       bold_mat=None, bold_ids=None):
     """Load the listed HCP subjects into a ``{sid: data}`` dict.
 
     ``sc_mat`` is the HCP_SC.mat path; SC matrices for ``subjects`` only are
     dereferenced from the v7.3 file (memory-lean — never loads all 1040).
+
+    When ``config.GROUP_AVG_FC`` is set, every subject's FC target is replaced
+    by the group-averaged FC (computed over all subjects); SC stays per-subject.
     """
     import h5py
     n = config.N_REGIONS
@@ -166,4 +206,14 @@ def load_all_subjects(subjects, fc_mat, sc_mat, fc_ids, sc_ids,
                 f"delay=[{(dl.min() if dl.size else 0):.2f},"
                 f"{(dl.max() if dl.size else 0):.2f}]ms"
             )
+
+    if getattr(config, "GROUP_AVG_FC", False):
+        gfc = _compute_group_fc(fc_mat, fc_ids, n)
+        gnan = np.zeros((n, n), dtype=bool)
+        for sid in subjects:
+            data[sid]["fc"] = gfc.copy()
+            data[sid]["fc_nan"] = gnan.copy()
+        print(f"  [GROUP_AVG_FC] every subject's FC target -> group mean "
+              f"over {len(fc_ids)} subjects (cortical-only n={n}). "
+              f"FC range=[{gfc.min():.3f},{gfc.max():.3f}] mean={gfc.mean():.3f}")
     return data

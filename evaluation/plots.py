@@ -217,7 +217,8 @@ def plot_one_simulation(sid, subject_data, theta_raw=None, param_names=None,
     d = subject_data[sid]
 
     if bold is None:
-        from cuBNM.simulate import simulate_single   # all sims via cuBNM
+        from engine_select import get_simulate_single  # honor INFERENCE_MODEL
+        simulate_single = get_simulate_single()
         if theta_raw is None or param_names is None:
             raise ValueError(
                 "plot_one_simulation: when bold is None, theta_raw and "

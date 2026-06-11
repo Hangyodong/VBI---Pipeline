@@ -1,0 +1,204 @@
+model_name: RWWEIB_DELAY
+full_name: reduced Wong-Wang E/I with excitatory feedforward inhibition and tract-length delay
+
+citations:
+  - tvboptim WongWangExcInh
+  - Deco et al. 2014 Journal of Neuroscience (10.1523/JNEUROSCI.5068-13.2014)
+  - Wong & Wang 2006 Journal of Neuroscience (10.1523/JNEUROSCI.3733-05.2006)
+
+# KEY DECISION — single delayed connectome coupling:
+#   tau_ij = tract_length_ij / conduction_speed
+#   globalinput_i(t) = sum_j C_ij * S_E,j(t - tau_ij)
+#
+# The delay is NOT a codegen feature: the cuBNM kernel already implements the
+# delayed coupling via a circular history buffer (conn_state_var_hist) +
+# get_k_buff_idx, activated at runtime when a delay matrix (sc_dist) and a
+# velocity are passed to the SimGroup. The delay_config block below is
+# documentation only (the codegen ignores it). To actually delay, run with
+# config.USE_DELAYS=True so the adapter feeds the per-subject delay matrix.
+#
+# The same delayed long-range excitatory signal drives both populations:
+#   E_i gets long-range excitation : + g_LRE * J_N * globalinput
+#   I_i gets feedforward inhibition: + g_FFI * J_N * globalinput
+# This is NOT SC @ S_I (single coupling, conn_state_var = S_E).
+# lambda_inh_exc = 1 absorbed into g_FFI. No FIC (J_i fixed).
+#
+# Inferred STAGE1 parameters: g_LRE, g_FFI, sigma, I_o
+
+latex_equations: |
+  \tau_{ij} =
+    \frac{L_{ij}}{v}
+
+  \mathrm{globalinput}_i(t) =
+    \sum_j C_{ij} S_j^E(t - \tau_{ij})
+
+  I_i^E =
+    w_E I_o
+    + w_p J_N S_i^E
+    + g_{LRE} J_N \sum_j C_{ij} S_j^E(t - \tau_{ij})
+    + I_{ext}
+    - J_i S_i^I
+
+  I_i^I =
+    w_I I_o
+    + J_N S_i^E
+    + g_{FFI} J_N \sum_j C_{ij} S_j^E(t - \tau_{ij})
+    - S_i^I
+
+  r_i^E =
+    \frac{a_E I_i^E - b_E}
+    {1 - e^{-d_E(a_E I_i^E - b_E)}}
+
+  r_i^I =
+    \frac{a_I I_i^I - b_I}
+    {1 - e^{-d_I(a_I I_i^I - b_I)}}
+
+  \dot{S_i^E} =
+    -\frac{S_i^E}{\tau_E}
+    + (1 - S_i^E)\gamma_E r_i^E
+    + \sigma_i\epsilon_i^E
+
+  \dot{S_i^I} =
+    -\frac{S_i^I}{\tau_I}
+    + \gamma_I r_i^I
+
+init_equations: |
+  S_E = 0.001
+  S_I = 0.001
+
+step_equations: |
+  # ------------------------------------------------------------
+  # Delayed coupling input
+  # ------------------------------------------------------------
+  # globalinput is computed by the cuBNM kernel as:
+  #   tau_ij         = tract_length_ij / conduction_speed
+  #   delay_steps_ij = round(tau_ij / dt)
+  #   globalinput_i  = sum_j C_ij * S_E_history[j, t - delay_steps_ij]
+  # i.e.  globalinput = SC_weight @ delayed(S_E)   (NOT current(S_E))
+  # (active only when USE_DELAYS=True at runtime; otherwise undelayed).
+  # ------------------------------------------------------------
+
+  # Input currents
+  I_E = w_E * I_o + w_p * J_N * S_E + globalinput * g_LRE * J_N + I_ext - J_i * S_I
+  I_I = w_I * I_o + J_N * S_E + globalinput * g_FFI * J_N - S_I
+
+  # Input-output firing-rate functions
+  aIb_E = a_E * I_E - b_E
+  aIb_I = a_I * I_I - b_I
+
+  r_E = aIb_E / (1 - exp(-d_E * aIb_E))
+  r_I = aIb_I / (1 - exp(-d_I * aIb_I))
+
+  # Synaptic gating dynamics (noise on S_E only, matches tvboptim)
+  dS_E = noise_S_E * sigma * sqrt_dt + dt_gamma_E * ((1 - S_E) * r_E) - dt_itau_E * S_E
+  dS_I = dt_gamma_I * r_I - dt_itau_I * S_I
+
+  S_E += dS_E
+  S_I += dS_I
+
+  # Clip gating variables to valid range
+  S_E = max(0.0, min(1.0, S_E))
+  S_I = max(0.0, min(1.0, S_I))
+
+conn_state_var: S_E
+
+delay_config:
+  enabled: true
+  weight_source: SC_weight
+  length_source: tract_length
+  delay_rule: tract_length / conduction_speed
+  tract_length_unit: mm
+  conduction_speed_unit: mm_per_ms
+  delay_unit: ms
+  delay_steps_rule: round(delay / dt)
+  buffer: circular_history
+
+is_osc: false
+bold_state_var: S_E
+
+variables:
+  # State variables
+  - {name: I_E, type: state_var, description: excitatory input current}
+  - {name: I_I, type: state_var, description: inhibitory input current}
+  - {name: r_E, type: state_var, description: excitatory firing rate}
+  - {name: r_I, type: state_var, description: inhibitory firing rate}
+  - {name: S_E, type: state_var, description: excitatory synaptic gating}
+  - {name: S_I, type: state_var, description: inhibitory synaptic gating}
+
+  # Intermediate variables
+  - {name: aIb_E, type: intermediate_var, description: a_E * I_E - b_E}
+  - {name: aIb_I, type: intermediate_var, description: a_I * I_I - b_I}
+  - {name: dS_E,  type: intermediate_var, description: S_E update}
+  - {name: dS_I,  type: intermediate_var, description: S_I update}
+
+  # Inferred parameters
+  - {name: g_LRE, type: global_param, value: 1.0,   description: long-range excitation gain inferred}
+  - {name: g_FFI, type: regional_param, value: 1.0, description: feedforward inhibition gain inferred}
+  - {name: sigma, type: regional_param, value: 0.01, description: noise amplitude inferred}
+  - {name: I_o,   type: regional_param, value: 0.382, description: background input current nA inferred}
+
+  # Fixed regional parameters
+  - {name: w_p, type: regional_param, value: 1.4,  description: local excitatory recurrence}
+  - {name: J_N, type: regional_param, value: 0.15, description: NMDA synaptic coupling nA}
+  - {name: J_i, type: regional_param, value: 1.0,  description: I-to-E inhibitory weight}
+
+  # Noise
+  - {name: noise_S_E, type: noise, description: noise for S_E}
+
+constants:
+  # Integration
+  - {type: double, name: dt,      value: dt,          description: integration step ms}
+  - {type: double, name: sqrt_dt, value: sqrt(mc.dt), description: sqrt of integration step}
+
+  # Input-output parameters
+  - {type: double, name: a_E, value: "310",  description: E input-output a}
+  - {type: double, name: b_E, value: "125",  description: E input-output b Hz}
+  - {type: double, name: d_E, value: "0.16", description: E input-output d s}
+
+  - {type: double, name: a_I, value: "615",   description: I input-output a}
+  - {type: double, name: b_I, value: "177",   description: I input-output b Hz}
+  - {type: double, name: d_I, value: "0.087", description: I input-output d s}
+
+  # Synaptic kinetics
+  - {type: double, name: gamma_E, value: "(double)0.641/(double)1000.0", description: E kinetic}
+  - {type: double, name: gamma_I, value: "(double)1.0/(double)1000.0",   description: I kinetic}
+
+  - {type: double, name: tau_E, value: "100", description: NMDA time constant ms}
+  - {type: double, name: tau_I, value: "10",  description: GABA time constant ms}
+
+  # External input scaling
+  - {type: double, name: w_E,   value: "1.0", description: E external input scaling}
+  - {type: double, name: w_I,   value: "0.7", description: I external input scaling}
+  - {type: double, name: I_ext, value: "0.0", description: external stimulation nA}
+
+  # Human conduction speed (documentation; runtime velocity comes from
+  # config.VELOCITY_M_PER_S via the adapter). 3.0 mm/ms = 3.0 m/s.
+  - {type: double, name: conduction_speed, value: "3.0", description: fixed conduction speed mm/ms}
+
+  # Precomputed constants
+  - {type: double, name: itau_E,     value: 1.0/mc.tau_E,        description: 1/tau_E}
+  - {type: double, name: itau_I,     value: 1.0/mc.tau_I,        description: 1/tau_I}
+  - {type: double, name: dt_itau_E,  value: mc.dt * mc.itau_E,   description: dt/tau_E}
+  - {type: double, name: dt_itau_I,  value: mc.dt * mc.itau_I,   description: dt/tau_I}
+  - {type: double, name: dt_gamma_E, value: mc.dt * mc.gamma_E,  description: dt*gamma_E}
+  - {type: double, name: dt_gamma_I, value: mc.dt * mc.gamma_I,  description: dt*gamma_I}
+
+python_config:
+  sel_state_var: S_E
+
+  labels:
+    g_LRE: '$g_{LRE}$'
+    g_FFI: '$g_{FFI}$'
+    sigma: '$\sigma$'
+    I_o: '$I_o$'
+    w_p: '$w^{p}$'
+    J_N: '$J^{N}$'
+    J_i: '$J_i$'
+    conduction_speed: '$v$'
+
+    I_E: '$I^E$'
+    I_I: '$I^I$'
+    r_E: '$r^E$'
+    r_I: '$r^I$'
+    S_E: '$S^E$'
+    S_I: '$S^I$'

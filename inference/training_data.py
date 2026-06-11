@@ -73,6 +73,10 @@ def collect_training_data(subjects, subject_data, prior_scaled,
         from cuBNM.simulate import simulate_gpu_batch  # cuBNM WCVBI (drop-in)
     elif eng == "rwweib":
         from cuBNM.simulate_rwweib import simulate_gpu_batch  # cuBNM RWW-EIB-FFI
+    elif eng == "rwweib2":
+        from cuBNM.simulate_rwweib_2cpl import simulate_gpu_batch  # cuBNM RWW-EIB 2-coupling
+    elif eng == "rwweibdelay":
+        from cuBNM.simulate_rwweib_delay import simulate_gpu_batch  # cuBNM RWW-EIB-FFI + delay
     elif eng == "rww":
         from cuBNM.simulate_rww import simulate_gpu_batch      # cuBNM stock rWW (Deco 2014)
     elif eng in ("vbi", "gpu"):
@@ -80,7 +84,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
     else:
         raise ValueError(
             f"unknown simulation engine {engine!r}; "
-            "expected 'cubnm', 'rwweib', 'rww', 'vbi', or 'gpu'."
+            "expected 'cubnm', 'rwweib', 'rwweib2', 'rww', 'vbi', or 'gpu'."
         )
     if verbose:
         print(f"  [Step 2] simulation engine: {eng}")

@@ -87,7 +87,7 @@ class FeaturePipeline:
             print(
                 f"\n  [FeaturePipeline] FC passthrough  "
                 f"({fc_train_raw.shape[0]:,} samples x "
-                f"{fc_train_raw.shape[1]:,} features, raw 6555-dim)"
+                f"{fc_train_raw.shape[1]:,} features, raw upper-tri)"
             )
         fc_out_dim = self.fc_dim
         if self.use_fcd:

@@ -26,6 +26,18 @@
 # Setup (HCP + RWW-EIB-FFI) — 파라미터를 여기서 수정하세요
 # =============================================================
 from pipeline_setup import PipelineConfig, setup_pipeline
+import os
+
+# SC scaling = max-normalization only (no log1p). CPU mean-field shows this is
+# the ONLY scaling where FIC reaches its target (<I_E>=0.377, 0% saturation) and
+# coupling shapes FC best (simFC~SC=0.170 vs 0.027 for log1p). Read by
+# data_loader._scale_weights at SC load time.
+os.environ.setdefault("VBI_SC_SCALE", "maxnorm")
+
+def _envi(name, default):
+    """Int override from env (for quick smoke runs); falls back to default."""
+    v = os.environ.get(name)
+    return int(v) if v not in (None, "") else default
 
 cfg = PipelineConfig(
     # ── Paths (HCP) ──────────────────────────────────────────
@@ -35,18 +47,18 @@ cfg = PipelineConfig(
     SC_FILE    = "HCP_SC.mat",       # var 'data' (3,n): id / weights / lengths (v7.3)
 
     # ── Atlas / regions ──────────────────────────────────────
-    N_REGIONS  = 381,                # HCP parcellation (FC_DIM auto = 72390)
+    N_REGIONS  = 360,                # cortical-only (Glasser 360; drop 21 subcortical). FC_DIM auto = 64620
 
     # ── Subject pool & split ─────────────────────────────────
-    N_SUBJECTS = 100,                # 사용 subject 수 (id 작은 것부터)
-    N_TRAIN    = 80,
-    N_VAL      = 0,
-    N_TEST     = 20,
+    N_SUBJECTS = _envi("N_SUBJECTS", 100),   # 사용 subject 수 (id 작은 것부터)
+    N_TRAIN    = _envi("N_TRAIN", 70),       # P7: was 80; free 10 for validation
+    N_VAL      = _envi("N_VAL", 10),         # P7: was 0 -> enables Step9/13 metrics + baseline
+    N_TEST     = _envi("N_TEST", 20),
     SEED       = 42,
 
     # ── Simulation ───────────────────────────────────────────
-    N_SIM      = 2_000,
-    GPU_BATCH  = 2_000,
+    N_SIM      = _envi("N_SIM", 2_000),
+    GPU_BATCH  = _envi("GPU_BATCH", 2_000),
 
     # ── Simulation time (ms) — HCP rfMRI TR=0.72s; 3min run, 1min cut ─
     T_END_MS   = 180_000.0,          # 3 min
@@ -79,12 +91,29 @@ setup_pipeline(cfg)
 
 import config
 
-# -- RWW-EIB-FFI inference model (overrides WC defaults) --
-config.INFERENCE_MODEL = "rwweib"
+# -- RWW-EIB two connectome couplings (RWWEIB_2CPL) ---------------------------
+# The equation-literal full WW: E driven by SC@S_E (gain g_LRE), I driven by
+# SC@S_I (gain g_FFI), two INDEPENDENT couplings. Built via the multi-coupling
+# cuBNM kernel surgery (conn_state_vars=[S_E,S_I]); validated by test_new_models
+# (T4: g_FFI>0 -> 2CPL != single-coupling FFI, proving the SC@S_I path is live).
+# No FIC, no delays (USE_DELAYS=False -> tract_length unused; delay is a later
+# increment via INFERENCE_MODEL="rwweibdelay" + USE_DELAYS=True).
+config.INFERENCE_MODEL = "rwweib2"
 config.STAGE1_PARAMS      = ["g_LRE", "g_FFI", "sigma", "I_o"]
 config.PARAM_NAMES_STAGE1 = config.STAGE1_PARAMS
 config.STAGE1_PRIOR_LOW   = [0.0, 0.0, 0.0,  0.30]
-config.STAGE1_PRIOR_HIGH  = [3.0, 3.0, 0.03, 0.45]   # g_LRE,g_FFI U(0,3); sigma U(0,0.03); I_o U(0.3,0.45)
+config.STAGE1_PRIOR_HIGH  = [3.0, 3.0, 0.03, 0.45]   # g_LRE,g_FFI U(0,3); sigma U(0,0.03); I_o U(0.30,0.45)
+config.RWWEIB2_FIXED      = {"w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0}
+# Metric/target levers (data analysis: per-subj raw-FC SC-corr ~0.05; cortical-
+# only + group-avg raises the achievable ceiling to ~0.2). Cortical-only is set
+# via N_REGIONS=360 above; group-avg FC target via the flag below.
+config.GROUP_AVG_FC       = True
+config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by final_test (uses Phase1) and hurt NLL (-6.12 vs -8.49) -> skip
+# ④ per-subject SC conditioning in the embedding (true amortization). Core is
+# implemented + CPU-verified in inference/embedding.py (per_subject_sc path) and
+# threaded through inference/snpe.py. Enabling it ALSO needs the producer+eval
+# wiring below (see checklist) and GPU validation, so it is OFF by default:
+config.EMBED_PER_SUBJECT_SC = False
 config.VELOCITY_M_PER_S   = 3.0                # human conduction velocity (m/s)
 config.USE_FCD            = False              # HCP FC only (no FCD)
 config.USE_DELAYS         = False              # enable later if needed (~9x sim cost)
@@ -421,21 +450,36 @@ diag_bold = None
 diag_sid = None
 
 _feat_path = os.path.join(config.OUTPUT_DIR, "features_stage1.npz")
+_cache_ok = False
 if os.path.exists(_feat_path):
-    print(f"  [Step 2 skip] loading saved features: {_feat_path}")
     _loaded = inference.load_extracted_features(
         save_dir=config.OUTPUT_DIR, tag="stage1"
     )
-    theta_scaled = _loaded["theta_scaled"]
-    theta_raw    = _loaded["theta_raw"]
-    fc_raw       = _loaded["fc_raw"]
-    fcd_raw      = _loaded["fcd_raw"]
-else:
+    _ts = _loaded["theta_scaled"]
+    _n_exp = len(train) * config.N_SIM
+    _p_exp = len(config.STAGE1_PARAMS)
+    # Only reuse the cache when it matches the CURRENT config: sample count
+    # (n_train x n_sim), param count (theta cols), and FC dim. Otherwise it is
+    # a stale cache from a different model/split -> re-simulate.
+    if (_ts.shape[0] == _n_exp and _ts.shape[1] == _p_exp
+            and _loaded["fc_raw"].shape[1] == config.FC_DIM):
+        print(f"  [Step 2 skip] loading saved features: {_feat_path}")
+        theta_scaled = _ts
+        theta_raw    = _loaded["theta_raw"]
+        fc_raw       = _loaded["fc_raw"]
+        fcd_raw      = _loaded["fcd_raw"]
+        _cache_ok = True
+    else:
+        print(f"  [Step 2] cache {_feat_path} STALE "
+              f"(theta {_ts.shape} vs expected ({_n_exp},{_p_exp}), "
+              f"fc_dim {_loaded['fc_raw'].shape[1]} vs {config.FC_DIM}) "
+              f"-> re-simulating")
+if not _cache_ok:
     _result = inference.step2_simulate_train(
         train, subject_data, prior_scaled, param_scaler,
         n_sim=config.N_SIM, apply_bw=True, verbose=True,
         save_first_sample=True,
-        engine="rwweib",  # Step 2 backend: cuBNM RWW-EIB-FFI
+        engine=config.INFERENCE_MODEL,  # Step 2 backend = active model (engine_select-consistent)
     )
     theta_scaled = _result["theta_scaled"]
     theta_raw    = _result["theta_raw"]
@@ -554,17 +598,23 @@ evaluate.report_step8(posterior, embedding_net, theta_scaled, x_input)
 
 
 # Phase 3: attention × gradient → top-k FC indices
-from inference.stage1 import run_phase2
+# P6: skipped when RUN_PHASE24=False. final_test reads s1["posterior"]=Phase1,
+# so Phase2/4 never affect the test result; Phase4 NLL was worse (-6.12 vs -8.49).
+import numpy as np
+if getattr(config, "RUN_PHASE24", True):
+    from inference.stage1 import run_phase2
+    phase3_result = run_phase2(
+        phase1=s1,
+        fc_obs=subject_data[train[0]]["fc"],
+        k=config.SELECTION_K,
+        n_samples=200,
+        verbose=True,
+    )
+    fc_selected_indices = phase3_result["fc_selected_indices"]
+else:
+    fc_selected_indices = np.arange(config.FC_DIM)   # all edges, no selection
+    print("[Phase 3] SKIPPED (RUN_PHASE24=False) — using all FC edges")
 
-phase3_result = run_phase2(
-    phase1=s1,
-    fc_obs=subject_data[train[0]]["fc"],
-    k=config.SELECTION_K,
-    n_samples=200,
-    verbose=True,
-)
-
-fc_selected_indices = phase3_result["fc_selected_indices"]
 print(f"[Phase 3] 선택된 FC indices: {len(fc_selected_indices)}개")
 print(f"  전체 FC 중 {len(fc_selected_indices)/config.FC_DIM*100:.1f}%")
 
@@ -580,23 +630,27 @@ s1["fc_selected_indices"] = fc_selected_indices
 
 
 # Phase 4: FC(k) + mask → RegionTransformer → SNPE-C
-from inference.stage1 import run_phase3
-
-phase4_result = run_phase3(
-    phase1=s1,
-    fc_selected_indices=fc_selected_indices,
-    sc_matrix=subject_data[train[0]]["sc"],
-    verbose=True,
-)
-
-posterior_2    = phase4_result["posterior"]
-embedding_net2 = phase4_result["embedding_net"]
-
-print(f"[Phase 4] 완료")
-print(f"  입력: FC({len(fc_selected_indices)}) + mask")
-print(f"  시뮬 재실행: 없음 (Phase 1 데이터 재사용)")
-print(f"  theta: {phase4_result['theta_scaled'].shape}")
-print(f"  fc:    {phase4_result['fc_raw'].shape}")
+# P6: when RUN_PHASE24=False, alias Phase4 posterior to Phase1 (full FC) so the
+# downstream analysis/validation blocks stay defined without 48min of retrain.
+if getattr(config, "RUN_PHASE24", True):
+    from inference.stage1 import run_phase3
+    phase4_result = run_phase3(
+        phase1=s1,
+        fc_selected_indices=fc_selected_indices,
+        sc_matrix=subject_data[train[0]]["sc"],
+        verbose=True,
+    )
+    posterior_2    = phase4_result["posterior"]
+    embedding_net2 = phase4_result["embedding_net"]
+    print(f"[Phase 4] 완료")
+    print(f"  입력: FC({len(fc_selected_indices)}) + mask")
+    print(f"  시뮬 재실행: 없음 (Phase 1 데이터 재사용)")
+    print(f"  theta: {phase4_result['theta_scaled'].shape}")
+    print(f"  fc:    {phase4_result['fc_raw'].shape}")
+else:
+    posterior_2    = s1["posterior"]        # alias Phase1 (full-FC)
+    embedding_net2 = s1["embedding_net"]
+    print("[Phase 4] SKIPPED (RUN_PHASE24=False) — posterior aliases Phase1 (full FC)")
 
 s2 = {
     "posterior":           posterior_2,
@@ -708,6 +762,18 @@ inference.evaluate_embedding_probing(
     s1["x_input"], config.STAGE1_PARAMS, verbose=True,
 )
 
+# Library-native (sbi) gradient sensitivity: which params the posterior is
+# most sensitive to at a real observation. Complements the linear probing R².
+try:
+    from active_sensitivity import report_active_sensitivity
+    report_active_sensitivity(
+        s1["posterior"], s1["theta_scaled"], config.STAGE1_PARAMS,
+        x_obs=fc_vec_0,                       # train[0] FC (already computed)
+        num_monte_carlo_samples=1000, verbose=True,
+    )
+except Exception as _e:
+    print(f"  [ActiveSubspace] skipped: {type(_e).__name__}: {_e}")
+
 sbc_ranks = inference.simulation_based_calibration(
     s1["posterior"], s1["prior_scaled"], s1["param_scaler"],
     s1["feature_pipeline"], config.STAGE1_PARAMS,
@@ -729,26 +795,31 @@ evaluate.report_step9(stage1_agg, baseline_agg)
 
 
 # ── Phase 4 (posterior_2) validation ─────────────────────
-# evaluate_validation_stage1 feeds full 6555-dim FC; posterior_2
-# expects k-selected (300-dim). Wrap the pipeline so .transform()
-# slices to fc_selected_indices before posterior.sample.
-class _SlicedPipeline:
-    def __init__(self, pipe, idx):
-        self.pipe, self.idx = pipe, idx
-    def transform(self, fc, fcd=None):
-        x = self.pipe.transform(fc, fcd)
-        return x[:, self.idx]
+# P6: only when Phase2/4 actually ran. With RUN_PHASE24=False, Phase4 aliases
+# Phase1 and fc_selected_indices = all edges, so this is redundant. (It also
+# crashes: _SlicedPipeline assumes a 2-D x but evaluate_subject passes a 1-D
+# single-subject FC vector -> x[:, idx] IndexError.)
+if getattr(config, "RUN_PHASE24", True):
+    class _SlicedPipeline:
+        def __init__(self, pipe, idx):
+            self.pipe, self.idx = pipe, idx
+        def transform(self, fc, fcd=None):
+            x = self.pipe.transform(fc, fcd)
+            x = x[None, :] if x.ndim == 1 else x      # single-subject -> (1, D)
+            return x[:, self.idx]
 
-s2_eval = dict(
-    s2,
-    feature_pipeline=_SlicedPipeline(
-        s1["feature_pipeline"], fc_selected_indices,
-    ),
-)
-s2_val_results, stage2_agg = evaluate.evaluate_validation_stage1(
-    val, subject_data, s2_eval, apply_bw=True, verbose=True,
-)
-evaluate.report_step9(stage2_agg, baseline_agg)
+    s2_eval = dict(
+        s2,
+        feature_pipeline=_SlicedPipeline(
+            s1["feature_pipeline"], fc_selected_indices,
+        ),
+    )
+    s2_val_results, stage2_agg = evaluate.evaluate_validation_stage1(
+        val, subject_data, s2_eval, apply_bw=True, verbose=True,
+    )
+    evaluate.report_step9(stage2_agg, baseline_agg)
+else:
+    stage2_agg = None   # Phase4 == Phase1; nothing extra to validate
 
 
 # ## Step 13. Model selection (validation)
@@ -802,9 +873,12 @@ inference.save_artifacts(
     prior_high              = config.STAGE1_PRIOR_HIGH,
     param_names_s1          = config.STAGE1_PARAMS,
     feature_config          = {
+        # FC is raw upper-tri passthrough (z-scored, no PCA) in this
+        # pipeline, so fc_pca may be absent — stay None-safe.
         "pca_dim_fc":  (
-            s1["feature_pipeline"].fc_pca.n_components
-            if s1["feature_pipeline"].fc_pca is not None else None
+            getattr(s1["feature_pipeline"], "fc_pca", None).n_components
+            if getattr(s1["feature_pipeline"], "fc_pca", None) is not None
+            else None
         ),
         "pca_dim_fcd": None,
     },

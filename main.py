@@ -1445,9 +1445,11 @@ inference.save_artifacts(
     prior_high              = config.STAGE1_PRIOR_HIGH,
     param_names_s1          = config.STAGE1_PARAMS,
     feature_config          = {
+        # FC is raw upper-tri passthrough (no PCA) — stay None-safe.
         "pca_dim_fc":  (
-            s1["feature_pipeline"].fc_pca.n_components
-            if s1["feature_pipeline"].fc_pca is not None else None
+            getattr(s1["feature_pipeline"], "fc_pca", None).n_components
+            if getattr(s1["feature_pipeline"], "fc_pca", None) is not None
+            else None
         ),
         "pca_dim_fcd": None,
     },
