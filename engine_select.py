@@ -51,9 +51,56 @@ def _module():
     return importlib.import_module(_MODEL_TO_MODULE[m])
 
 
+def load_network_labels():
+    """Row-aligned atlas network labels from config.NETWORK_LABELS_CSV, or None.
+
+    Reads the first column of each non-empty line (aligned by ROW ORDER, not id).
+    """
+    path = getattr(config, "NETWORK_LABELS_CSV", None)
+    if not path:
+        return None
+    rows = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(line.split(",")[0])
+    return rows or None
+
+
+def latent_wrap(base_sim):
+    """Wrap a base simulate_gpu_batch so latent z (theta) is decoded to per-region
+    parameter maps before simulation (PARAMETER_MODE='latent_regionwise').
+
+    The wrapper builds the region basis from the passed SC (so it is correct
+    per-subject), decodes z -> param maps, and injects them as '<param>_matrix'
+    fixed overrides. theta is otherwise NOT used as physical parameters.
+    """
+    import numpy as np
+    from region_basis import build_region_basis
+    from param_decoder import (decode_latent_to_param_maps,
+                               make_fixed_overrides_from_param_maps)
+
+    def wrapped(weights, theta_z, param_names=None, fixed_overrides=None,
+                delays=None, apply_bw=True, label=None, n_total=None, **kw):
+        basis = build_region_basis(weights, labels=load_network_labels(), config=config)
+        maps = decode_latent_to_param_maps(theta_z, basis, config)
+        ov = dict(fixed_overrides or {})
+        ov.update(make_fixed_overrides_from_param_maps(maps))
+        n = np.asarray(theta_z).shape[0]
+        return base_sim(weights, np.zeros((n, 0), dtype=np.float64),
+                        param_names=[], fixed_overrides=ov, delays=delays,
+                        apply_bw=apply_bw, label=label, n_total=n_total, **kw)
+    return wrapped
+
+
 def get_simulate_gpu_batch():
-    """Return the active engine's ``simulate_gpu_batch``."""
-    return _module().simulate_gpu_batch
+    """Return the active engine's ``simulate_gpu_batch`` (latent-wrapped if
+    PARAMETER_MODE='latent_regionwise')."""
+    base = _module().simulate_gpu_batch
+    if str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise":
+        return latent_wrap(base)
+    return base
 
 
 def get_simulate_single():

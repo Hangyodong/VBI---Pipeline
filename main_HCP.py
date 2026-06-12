@@ -117,7 +117,10 @@ config.GROUP_AVG_FC       = (os.environ.get("GROUP_AVG_FC", "1") == "1")  # Fals
 # param_decoder turns z into per-region maps for [g_LRE,g_FFI,I_o,sigma]; cuBNM
 # receives per-node matrices. See region_basis.py / param_decoder.py / PIPELINE.md.
 config.PARAMETER_MODE     = os.environ.get("PARAMETER_MODE", "homogeneous")
-config.HETERO_PARAMS      = ["g_LRE", "g_FFI", "I_o", "sigma"]
+# Provisional: 3 active hetero params (g_LRE deferred — it is a global_param and
+# needs a cuBNM rebuild to go regional; see runner ModelNotBuiltError). Final
+# target is 4 incl g_LRE.
+config.HETERO_PARAMS      = ["g_FFI", "I_o", "sigma"]
 config.HETERO_BOUNDS      = {"g_LRE": (0.0, 9.0), "g_FFI": (0.0, 9.0),
                              "I_o": (0.15, 0.60), "sigma": (0.0, 0.09)}
 config.BASIS_TYPE         = "network_laplacian"
@@ -364,6 +367,33 @@ subject_data = data_loader.load_all_subjects(
 # Result
 evaluate.report_step1(train, val, test, subject_data)
 
+# ── Latent region-wise setup (PARAMETER_MODE='latent_regionwise') ────────────
+# Replace STAGE1_PARAMS with latent coefficient names and make the prior a
+# BoxUniform[-1,1]^latent_dim (scaler becomes identity). The decoder maps z to
+# per-region maps for HETERO_PARAMS at sim time (per-subject basis).
+if str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise":
+    from region_basis import build_region_basis
+    from param_decoder import latent_param_names, latent_dim, per_param_block
+    from engine_select import load_network_labels
+    _labels = load_network_labels()
+    _basis0 = build_region_basis(subject_data[train[0]]["sc"], _labels, config)
+    _lnames = latent_param_names(_basis0, config)
+    _ld = latent_dim(_basis0, config)
+    config.STAGE1_PARAMS      = _lnames
+    config.PARAM_NAMES_STAGE1 = _lnames
+    config.STAGE1_PRIOR_LOW   = [-1.0] * _ld
+    config.STAGE1_PRIOR_HIGH  = [1.0] * _ld
+    _block, _nnet, _K = per_param_block(_basis0)
+    print("\n  ===== PARAMETER_MODE = latent_regionwise (provisional) =====")
+    print(f"    target FC mode   : {'group-avg' if config.GROUP_AVG_FC else 'subject-specific'}")
+    print(f"    active hetero    : {config.HETERO_PARAMS}  (g_LRE NOT regional yet)")
+    print(f"    regions          : {config.N_REGIONS}")
+    print(f"    basis            : {config.BASIS_TYPE}  networks={_nnet}  laplacian_K={_K}")
+    print(f"    latent dim       : {_ld}  (= {len(config.HETERO_PARAMS)} params x {_block} slots)")
+    print(f"    SNPE target      : latent z  (BoxUniform[-1,1]^{_ld})")
+    print(f"    decoded map shape: (n_sims, {config.N_REGIONS}) per param")
+    print("  ============================================================")
+
 
 # ## Train data: weights / tract lengths / empirical FC
 # 
@@ -466,7 +496,27 @@ import os
 diag_bold = None
 diag_sid = None
 
+import json as _json
+
+
+def _cache_meta_now():
+    """Cache-identity metadata. Mismatch => stale (never mix modes/targets)."""
+    _lat = str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
+    return {
+        "target_fc_mode": "group" if config.GROUP_AVG_FC else "subject",
+        "PARAMETER_MODE": config.PARAMETER_MODE,
+        "N_REGIONS": int(config.N_REGIONS),
+        "FC_DIM": int(config.FC_DIM),
+        "hetero_params": list(config.HETERO_PARAMS) if _lat else [],
+        "basis_type": config.BASIS_TYPE if _lat else None,
+        "n_laplacian_basis": int(config.N_LAPLACIAN_BASIS) if _lat else None,
+        "latent_dim": len(config.STAGE1_PARAMS) if _lat else None,
+        "model": config.INFERENCE_MODEL,
+    }
+
+
 _feat_path = os.path.join(config.OUTPUT_DIR, "features_stage1.npz")
+_meta_path = os.path.join(config.OUTPUT_DIR, "features_stage1_meta.json")
 _cache_ok = False
 if os.path.exists(_feat_path):
     _loaded = inference.load_extracted_features(
@@ -475,11 +525,15 @@ if os.path.exists(_feat_path):
     _ts = _loaded["theta_scaled"]
     _n_exp = len(train) * config.N_SIM
     _p_exp = len(config.STAGE1_PARAMS)
-    # Only reuse the cache when it matches the CURRENT config: sample count
-    # (n_train x n_sim), param count (theta cols), and FC dim. Otherwise it is
-    # a stale cache from a different model/split -> re-simulate.
+    _meta_old = {}
+    if os.path.exists(_meta_path):
+        with open(_meta_path) as _mf:
+            _meta_old = _json.load(_mf)
+    _meta_match = (_meta_old == _cache_meta_now())
+    # Reuse only when shapes AND metadata match the CURRENT config. Otherwise the
+    # cache is from a different model / split / target-FC / parameter mode.
     if (_ts.shape[0] == _n_exp and _ts.shape[1] == _p_exp
-            and _loaded["fc_raw"].shape[1] == config.FC_DIM):
+            and _loaded["fc_raw"].shape[1] == config.FC_DIM and _meta_match):
         print(f"  [Step 2 skip] loading saved features: {_feat_path}")
         theta_scaled = _ts
         theta_raw    = _loaded["theta_raw"]
@@ -489,8 +543,8 @@ if os.path.exists(_feat_path):
     else:
         print(f"  [Step 2] cache {_feat_path} STALE "
               f"(theta {_ts.shape} vs expected ({_n_exp},{_p_exp}), "
-              f"fc_dim {_loaded['fc_raw'].shape[1]} vs {config.FC_DIM}) "
-              f"-> re-simulating")
+              f"fc_dim {_loaded['fc_raw'].shape[1]} vs {config.FC_DIM}, "
+              f"meta_match={_meta_match}) -> re-simulating")
 if not _cache_ok:
     _result = inference.step2_simulate_train(
         train, subject_data, prior_scaled, param_scaler,
@@ -539,7 +593,7 @@ import os
 inference.step3_summary_features(fc_raw, fcd_raw, verbose=True)
 
 _feat_path = os.path.join(config.OUTPUT_DIR, "features_stage1.npz")
-if not os.path.exists(_feat_path):
+if not _cache_ok:
     inference.save_extracted_features(
         theta_scaled, theta_raw, fc_raw, fcd_raw,
         param_names=config.STAGE1_PARAMS,
@@ -547,8 +601,11 @@ if not os.path.exists(_feat_path):
         tag="stage1",
         verbose=True,
     )
+    with open(_meta_path, "w") as _mf:        # cache-identity sidecar
+        _json.dump(_cache_meta_now(), _mf, indent=2)
+    print(f"  [cache meta] {_meta_path}: {_cache_meta_now()}")
 else:
-    print(f"  features_stage1.npz exists — skip save")
+    print(f"  features_stage1.npz reused — skip save")
 
 evaluate.report_step3(fc_raw, fcd_raw)
 
@@ -871,6 +928,20 @@ evaluate.plot_fc_comparison(
 
 # Result
 evaluate.report_step14(test_summary)
+
+# ── Region-wise parameter maps (latent_regionwise mode) ─────────────────────
+if (str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
+        and getattr(config, "SAVE_PARAM_MAPS", False)):
+    from save_param_maps import save_param_maps as _save_maps
+    print("\n  [Step 14b] region-wise parameter maps (val + test subjects)")
+    print(f"    NOTE: provisional mode — active params {config.HETERO_PARAMS}; "
+          f"g_LRE is NOT yet regional (global_param; needs cuBNM rebuild).")
+    _save_maps(
+        posterior, feature_pipeline, param_scaler, subject_data,
+        list(val) + list(test),
+        out_path=os.path.join(config.OUTPUT_DIR, "param_maps.npz"),
+        n_post=getattr(config, "N_POSTERIOR", 1000), verbose=True,
+    )
 
 
 # ## Save outputs and summary

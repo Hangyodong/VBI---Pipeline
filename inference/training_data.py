@@ -86,8 +86,14 @@ def collect_training_data(subjects, subject_data, prior_scaled,
             f"unknown simulation engine {engine!r}; "
             "expected 'cubnm', 'rwweib', 'rwweib2', 'rww', 'vbi', or 'gpu'."
         )
+    # latent region-wise mode: decode z -> per-region param maps before sim.
+    _latent = str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
+    if _latent:
+        from engine_select import latent_wrap
+        simulate_gpu_batch = latent_wrap(simulate_gpu_batch)
     if verbose:
-        print(f"  [Step 2] simulation engine: {eng}")
+        print(f"  [Step 2] simulation engine: {eng}"
+              + ("  [latent_regionwise: z -> region maps]" if _latent else ""))
 
     # Guard: the scaler (built at Step 7) and the current param_names
     # (config.STAGE1_PARAMS) must describe the SAME parameters in the SAME
