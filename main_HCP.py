@@ -99,11 +99,14 @@ import config
 # No FIC, no delays (USE_DELAYS=False -> tract_length unused; delay is a later
 # increment via INFERENCE_MODEL="rwweibdelay" + USE_DELAYS=True).
 config.INFERENCE_MODEL = "rwweib2"
-config.STAGE1_PARAMS      = ["g_LRE", "g_FFI", "sigma", "I_o"]
+# Inferred (4): g_LRE/g_FFI (2 coupling gains) + I_o + sigma. Priors 3x the
+# original width. Rest fixed (w_E/w_I/J_i/w_p at defaults).
+config.STAGE1_PARAMS      = ["g_LRE", "g_FFI", "I_o", "sigma"]
 config.PARAM_NAMES_STAGE1 = config.STAGE1_PARAMS
-config.STAGE1_PRIOR_LOW   = [0.0, 0.0, 0.0,  0.30]
-config.STAGE1_PRIOR_HIGH  = [3.0, 3.0, 0.03, 0.45]   # g_LRE,g_FFI U(0,3); sigma U(0,0.03); I_o U(0.30,0.45)
-config.RWWEIB2_FIXED      = {"w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0}
+config.STAGE1_PRIOR_LOW   = [0.0, 0.0, 0.15, 0.0]
+config.STAGE1_PRIOR_HIGH  = [9.0, 9.0, 0.60, 0.09]   # 3x: g_LRE,g_FFI U(0,9); I_o U(0.15,0.60); sigma U(0,0.09)
+config.RWWEIB2_FIXED      = {"w_E": 1.0, "w_I": 0.7, "J_i": 1.0, "w_p": 1.4,
+                             "J_N": 0.15, "lambda_IE": 1.0}
 # Metric/target levers (data analysis: per-subj raw-FC SC-corr ~0.05; cortical-
 # only + group-avg raises the achievable ceiling to ~0.2). Cortical-only is set
 # via N_REGIONS=360 above; group-avg FC target via the flag below.

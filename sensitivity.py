@@ -83,10 +83,23 @@ def main():
     fin = np.isfinite(real_vec)
     nz = (sc_vec > 0) & fin
 
-    pnames = list(config.STAGE1_PARAMS)
-    lo = np.asarray(config.STAGE1_PRIOR_LOW, float)
-    hi = np.asarray(config.STAGE1_PRIOR_HIGH, float)
-    center = (lo + hi) / 2.0
+    # ALL runtime model parameters (name, default/center, lo, hi). The yaml
+    # constants (a_E/b_E/d/tau/gamma/w_E/w_I) are compile-time in cuBNM and
+    # cannot be swept without a rebuild, so they are not listed here.
+    MODEL_PARAMS = [
+        ("g_LRE",     1.0,   0.0,   3.0),    # inferred
+        ("g_FFI",     1.0,   0.0,   3.0),    # inferred
+        ("sigma",     0.01,  0.001, 0.03),   # inferred
+        ("I_o",       0.382, 0.30,  0.45),   # inferred
+        ("w_p",       1.4,   0.7,   2.1),    # fixed (local E recurrence)
+        ("J_N",       0.15,  0.075, 0.30),   # fixed (NMDA coupling)
+        ("J_i",       1.0,   0.3,   2.0),    # fixed (I->E weight)
+        ("lambda_IE", 1.0,   0.0,   2.0),    # fixed (I long-range scaling)
+    ]
+    pnames = [m[0] for m in MODEL_PARAMS]
+    center = np.array([m[1] for m in MODEL_PARAMS], float)
+    lo = np.array([m[2] for m in MODEL_PARAMS], float)
+    hi = np.array([m[3] for m in MODEL_PARAMS], float)
     sweep_params = (args.params.split(",") if args.params else pnames)
 
     print("=" * 78)

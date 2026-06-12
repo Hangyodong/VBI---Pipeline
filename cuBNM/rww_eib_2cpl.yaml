@@ -112,6 +112,10 @@ variables:
   - {name: sigma, type: regional_param, value: 0.01, description: noise amplitude inferred}
   - {name: I_o,   type: regional_param, value: 0.382, description: background input current nA inferred}
 
+  # External-input scaling weights (promoted from constants -> inferrable)
+  - {name: w_E, type: regional_param, value: 1.0, description: E external input scaling inferred}
+  - {name: w_I, type: regional_param, value: 0.7, description: I external input scaling inferred}
+
   # Fixed regional parameters
   - {name: w_p,       type: regional_param, value: 1.4,  description: local excitatory recurrence}
   - {name: J_N,       type: regional_param, value: 0.15, description: NMDA synaptic coupling nA}
@@ -139,9 +143,7 @@ constants:
 
   - {type: double, name: tau_E, value: "100", description: NMDA time constant ms}
   - {type: double, name: tau_I, value: "10",  description: GABA time constant ms}
-
-  - {type: double, name: w_E, value: "1.0", description: E external input scaling}
-  - {type: double, name: w_I, value: "0.7", description: I external input scaling}
+  # w_E, w_I promoted to regional_params (see variables) so they can be inferred.
 
   - {type: double, name: itau_E,     value: 1.0/mc.tau_E,        description: 1/tau_E}
   - {type: double, name: itau_I,     value: 1.0/mc.tau_I,        description: 1/tau_I}

@@ -45,6 +45,7 @@ class ModelNotBuiltError(RuntimeError):
 _GLOBAL_DEFAULT = {"g_LRE": 1.0}
 _RWWEIB2_REGIONAL_DEFAULT = {
     "g_FFI": 1.0, "sigma": 0.01, "I_o": 0.382,
+    "w_E": 1.0, "w_I": 0.7,                       # promoted from constants (inferrable)
     "w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0,
 }
 
@@ -105,8 +106,11 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
         for name, dval in regional.items()
     }
 
-    # Override the inferred regional params with per-sim theta (broadcast to nodes).
-    for name in _INFERRED:
+    # Override ANY regional param present in param_names with per-sim theta
+    # (broadcast to nodes). This covers the inferred params (g_FFI/sigma/I_o)
+    # and also lets a sensitivity sweep vary a normally-fixed regional param
+    # (w_p/J_N/J_i/lambda_IE) by listing it in param_names.
+    for name in regional:
         col = _theta_column(theta, pn, name)
         if col is not None:
             param_lists[name] = np.ascontiguousarray(
@@ -118,6 +122,20 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
     if g_lre is None:
         g_lre = np.full(n_sims, _GLOBAL_DEFAULT["g_LRE"], dtype=np.float64)
     param_lists["g_LRE"] = np.ascontiguousarray(g_lre, dtype=np.float64)
+
+    # Per-(sim,node) override matrices: any fixed key "<name>_matrix" with shape
+    # (n_sims, n_nodes) replaces that regional param node-by-node. Used for FIC
+    # (J_i_matrix -> operating point) and for HETEROGENEOUS params (per-node
+    # random / gradient-parameterized). g_LRE is global (per-sim scalar) and is
+    # NOT overridable this way.
+    if fixed:
+        for name in regional:
+            key = f"{name}_matrix"
+            if key in fixed:
+                arr = np.asarray(fixed[key], dtype=np.float64)
+                if arr.shape != (n_sims, n_nodes):
+                    raise ValueError(f"{key} shape {arr.shape} != ({n_sims},{n_nodes})")
+                param_lists[name] = np.ascontiguousarray(arr)
 
     return param_lists
 
