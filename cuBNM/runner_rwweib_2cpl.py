@@ -136,6 +136,24 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
                 if arr.shape != (n_sims, n_nodes):
                     raise ValueError(f"{key} shape {arr.shape} != ({n_sims},{n_nodes})")
                 param_lists[name] = np.ascontiguousarray(arr)
+        # criterion 10: region-wise g_LRE requires g_LRE to be a regional_param.
+        # It is currently a global_param -> cannot be set per-node. Do NOT silently
+        # keep it global; fail clearly with the exact rebuild steps.
+        if "g_LRE_matrix" in fixed and "g_LRE" not in regional:
+            raise ModelNotBuiltError(
+                "Region-wise g_LRE requested (g_LRE_matrix) but g_LRE is a "
+                "global_param in the built RWWEIB_2CPL model. To make it regional:\n"
+                "  1. cuBNM/rww_eib_2cpl.yaml: change g_LRE from "
+                "'type: global_param' to 'type: regional_param'.\n"
+                "  2. cuBNM/runner_rwweib_2cpl.py: move 'g_LRE' from "
+                "_GLOBAL_DEFAULT into _RWWEIB2_REGIONAL_DEFAULT.\n"
+                "  3. Rebuild cuBNM:\n"
+                "       cd /scratch/home/wog3597/cubnm_build\n"
+                "       python codegen/generate_models.py\n"
+                "       pip install -e . --no-build-isolation\n"
+                "  (Note: g_LRE is the model's only global_param; promoting it "
+                "leaves 0 global_params — verify the build succeeds.)"
+            )
 
     return param_lists
 

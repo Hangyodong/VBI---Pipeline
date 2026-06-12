@@ -110,7 +110,21 @@ config.RWWEIB2_FIXED      = {"w_E": 1.0, "w_I": 0.7, "J_i": 1.0, "w_p": 1.4,
 # Metric/target levers (data analysis: per-subj raw-FC SC-corr ~0.05; cortical-
 # only + group-avg raises the achievable ceiling to ~0.2). Cortical-only is set
 # via N_REGIONS=360 above; group-avg FC target via the flag below.
-config.GROUP_AVG_FC       = True
+config.GROUP_AVG_FC       = (os.environ.get("GROUP_AVG_FC", "1") == "1")  # False -> per-subject FC
+# ── Region-wise latent inference (new mode; default OFF = homogeneous baseline) ──
+# PARAMETER_MODE: "homogeneous" (baseline) | "latent_regionwise".
+# In latent mode SNPE infers a low-dim latent z (BoxUniform[-1,1]^latent_dim);
+# param_decoder turns z into per-region maps for [g_LRE,g_FFI,I_o,sigma]; cuBNM
+# receives per-node matrices. See region_basis.py / param_decoder.py / PIPELINE.md.
+config.PARAMETER_MODE     = os.environ.get("PARAMETER_MODE", "homogeneous")
+config.HETERO_PARAMS      = ["g_LRE", "g_FFI", "I_o", "sigma"]
+config.HETERO_BOUNDS      = {"g_LRE": (0.0, 9.0), "g_FFI": (0.0, 9.0),
+                             "I_o": (0.15, 0.60), "sigma": (0.0, 0.09)}
+config.BASIS_TYPE         = "network_laplacian"
+config.N_LAPLACIAN_BASIS  = int(os.environ.get("N_LAPLACIAN_BASIS", "4"))
+config.USE_NETWORK_BASIS  = True
+config.SAVE_PARAM_MAPS    = True
+config.NETWORK_LABELS_CSV = None    # optional atlas network labels (row-aligned); None -> const+Laplacian only
 config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by final_test (uses Phase1) and hurt NLL (-6.12 vs -8.49) -> skip
 # ④ per-subject SC conditioning in the embedding (true amortization). Core is
 # implemented + CPU-verified in inference/embedding.py (per_subject_sc path) and

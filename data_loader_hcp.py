@@ -213,7 +213,11 @@ def load_all_subjects(subjects, fc_mat, sc_mat, fc_ids, sc_ids,
         for sid in subjects:
             data[sid]["fc"] = gfc.copy()
             data[sid]["fc_nan"] = gnan.copy()
-        print(f"  [GROUP_AVG_FC] every subject's FC target -> group mean "
-              f"over {len(fc_ids)} subjects (cortical-only n={n}). "
-              f"FC range=[{gfc.min():.3f},{gfc.max():.3f}] mean={gfc.mean():.3f}")
+        print(f"  [target FC] mode=GROUP-AVG | subjects={len(subjects)} | "
+              f"FC shape=({n},{n}) | group mean over {len(fc_ids)} subjects "
+              f"| range=[{gfc.min():.3f},{gfc.max():.3f}] mean={gfc.mean():.3f}")
+    else:
+        _f0 = data[subjects[0]]["fc"]
+        print(f"  [target FC] mode=SUBJECT-SPECIFIC | subjects={len(subjects)} | "
+              f"FC shape={_f0.shape} | each subject uses its own empirical FC")
     return data
