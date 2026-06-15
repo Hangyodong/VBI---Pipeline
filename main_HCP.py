@@ -776,26 +776,34 @@ import matplotlib.pyplot as plt
 from features.fc import fc_to_upper_tri
 
 # ── 1. Posterior 샘플링 (Phase2: raw FC, Phase4: selected FC) ──
-n_samples = config.N_POSTERIOR
+# High-dim region-wise flows (e.g. 1440-dim) blow up GPU memory when sampling
+# many draws WITH autograd on (the autoregressive inverse builds a huge graph).
+# Sample under no_grad and cap the count for region-wise modes.
+_RW = str(getattr(config, "PARAMETER_MODE", "homogeneous")) in (
+    "latent_regionwise", "direct_regionwise")
+n_samples = min(config.N_POSTERIOR, 512) if _RW else config.N_POSTERIOR
 fc_obs_0  = subject_data[train[0]]["fc"]
 fc_vec_0  = fc_to_upper_tri(fc_obs_0)
 
-samples_1 = posterior.sample(
-    (n_samples,),
-    x=torch.tensor(fc_vec_0, dtype=torch.float32
-        ).unsqueeze(0).to(config.SBI_DEVICE),
-    show_progress_bars=False,
-    reject_outside_prior=False,
-).detach().cpu().numpy()
+if config.SBI_DEVICE == "cuda":
+    torch.cuda.empty_cache()
+with torch.no_grad():
+    samples_1 = posterior.sample(
+        (n_samples,),
+        x=torch.tensor(fc_vec_0, dtype=torch.float32
+            ).unsqueeze(0).to(config.SBI_DEVICE),
+        show_progress_bars=False,
+        reject_outside_prior=False,
+    ).detach().cpu().numpy()
 
-fc_vec_k  = fc_vec_0[fc_selected_indices]
-samples_2 = posterior_2.sample(
-    (n_samples,),
-    x=torch.tensor(fc_vec_k, dtype=torch.float32
-        ).unsqueeze(0).to(config.SBI_DEVICE),
-    show_progress_bars=False,
-    reject_outside_prior=False,
-).detach().cpu().numpy()
+    fc_vec_k  = fc_vec_0[fc_selected_indices]
+    samples_2 = posterior_2.sample(
+        (n_samples,),
+        x=torch.tensor(fc_vec_k, dtype=torch.float32
+            ).unsqueeze(0).to(config.SBI_DEVICE),
+        show_progress_bars=False,
+        reject_outside_prior=False,
+    ).detach().cpu().numpy()
 
 # scaled prior std = 1 (BoxUniform[-1,1])
 prior_std = 1.0
