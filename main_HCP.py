@@ -117,10 +117,9 @@ config.GROUP_AVG_FC       = (os.environ.get("GROUP_AVG_FC", "1") == "1")  # Fals
 # param_decoder turns z into per-region maps for [g_LRE,g_FFI,I_o,sigma]; cuBNM
 # receives per-node matrices. See region_basis.py / param_decoder.py / PIPELINE.md.
 config.PARAMETER_MODE     = os.environ.get("PARAMETER_MODE", "homogeneous")
-# Provisional: 3 active hetero params (g_LRE deferred — it is a global_param and
-# needs a cuBNM rebuild to go regional; see runner ModelNotBuiltError). Final
-# target is 4 incl g_LRE.
-config.HETERO_PARAMS      = ["g_FFI", "I_o", "sigma"]
+# 4 region-wise params (g_LRE promoted global->regional; requires cuBNM rebuilt
+# from the updated rww_eib_2cpl.yaml).
+config.HETERO_PARAMS      = ["g_LRE", "g_FFI", "I_o", "sigma"]
 config.HETERO_BOUNDS      = {"g_LRE": (0.0, 9.0), "g_FFI": (0.0, 9.0),
                              "I_o": (0.15, 0.60), "sigma": (0.0, 0.09)}
 config.BASIS_TYPE         = "network_laplacian"

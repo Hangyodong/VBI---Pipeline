@@ -42,8 +42,9 @@ class ModelNotBuiltError(RuntimeError):
 # g_LRE is the model's single global_param (shape (n_sims,)); everything else is
 # a regional_param (shape (n_sims, nodes)). Inferred: g_LRE (global) +
 # g_FFI/sigma/I_o (regional). Fixed regional: w_p/J_N/J_i/lambda_IE.
-_GLOBAL_DEFAULT = {"g_LRE": 1.0}
+_GLOBAL_DEFAULT = {}                              # g_LRE promoted to regional (0 globals)
 _RWWEIB2_REGIONAL_DEFAULT = {
+    "g_LRE": 1.0,                                 # promoted global -> regional (per-node)
     "g_FFI": 1.0, "sigma": 0.01, "I_o": 0.382,
     "w_E": 1.0, "w_I": 0.7,                       # promoted from constants (inferrable)
     "w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0,
@@ -117,17 +118,12 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
                 np.repeat(col[:, None], n_nodes, axis=1), dtype=np.float64
             )
 
-    # Global param g_LRE: per-sim scalar, shape (n_sims,).
-    g_lre = _theta_column(theta, pn, "g_LRE")
-    if g_lre is None:
-        g_lre = np.full(n_sims, _GLOBAL_DEFAULT["g_LRE"], dtype=np.float64)
-    param_lists["g_LRE"] = np.ascontiguousarray(g_lre, dtype=np.float64)
+    # g_LRE is now a regional_param (promoted from global): handled by the
+    # regional loop above (theta) and the matrix loop below (g_LRE_matrix).
 
     # Per-(sim,node) override matrices: any fixed key "<name>_matrix" with shape
-    # (n_sims, n_nodes) replaces that regional param node-by-node. Used for FIC
-    # (J_i_matrix -> operating point) and for HETEROGENEOUS params (per-node
-    # random / gradient-parameterized). g_LRE is global (per-sim scalar) and is
-    # NOT overridable this way.
+    # (n_sims, n_nodes) replaces that regional param node-by-node. Covers FIC
+    # (J_i_matrix) and HETEROGENEOUS region-wise params incl. g_LRE.
     if fixed:
         for name in regional:
             key = f"{name}_matrix"
@@ -136,24 +132,6 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
                 if arr.shape != (n_sims, n_nodes):
                     raise ValueError(f"{key} shape {arr.shape} != ({n_sims},{n_nodes})")
                 param_lists[name] = np.ascontiguousarray(arr)
-        # criterion 10: region-wise g_LRE requires g_LRE to be a regional_param.
-        # It is currently a global_param -> cannot be set per-node. Do NOT silently
-        # keep it global; fail clearly with the exact rebuild steps.
-        if "g_LRE_matrix" in fixed and "g_LRE" not in regional:
-            raise ModelNotBuiltError(
-                "Region-wise g_LRE requested (g_LRE_matrix) but g_LRE is a "
-                "global_param in the built RWWEIB_2CPL model. To make it regional:\n"
-                "  1. cuBNM/rww_eib_2cpl.yaml: change g_LRE from "
-                "'type: global_param' to 'type: regional_param'.\n"
-                "  2. cuBNM/runner_rwweib_2cpl.py: move 'g_LRE' from "
-                "_GLOBAL_DEFAULT into _RWWEIB2_REGIONAL_DEFAULT.\n"
-                "  3. Rebuild cuBNM:\n"
-                "       cd /scratch/home/wog3597/cubnm_build\n"
-                "       python codegen/generate_models.py\n"
-                "       pip install -e . --no-build-isolation\n"
-                "  (Note: g_LRE is the model's only global_param; promoting it "
-                "leaves 0 global_params — verify the build succeeds.)"
-            )
 
     return param_lists
 
