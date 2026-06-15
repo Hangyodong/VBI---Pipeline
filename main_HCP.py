@@ -385,7 +385,7 @@ if str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise":
     _block, _nnet, _K = per_param_block(_basis0)
     print("\n  ===== PARAMETER_MODE = latent_regionwise (provisional) =====")
     print(f"    target FC mode   : {'group-avg' if config.GROUP_AVG_FC else 'subject-specific'}")
-    print(f"    active hetero    : {config.HETERO_PARAMS}  (g_LRE NOT regional yet)")
+    print(f"    active hetero    : {config.HETERO_PARAMS}  (all 4 regional; cuBNM rebuilt)")
     print(f"    regions          : {config.N_REGIONS}")
     print(f"    basis            : {config.BASIS_TYPE}  networks={_nnet}  laplacian_K={_K}")
     print(f"    latent dim       : {_ld}  (= {len(config.HETERO_PARAMS)} params x {_block} slots)")

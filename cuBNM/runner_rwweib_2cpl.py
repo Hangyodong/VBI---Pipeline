@@ -50,8 +50,8 @@ _RWWEIB2_REGIONAL_DEFAULT = {
     "w_p": 1.4, "J_N": 0.15, "J_i": 1.0, "lambda_IE": 1.0,
 }
 
-# Inferred regional theta columns (g_LRE handled separately as global).
-_INFERRED = ("g_FFI", "sigma", "I_o")
+# All params are regional now (g_LRE promoted global->regional); any param in
+# param_names is read per-sim from theta by the regional loop in build_param_lists.
 
 
 def _import_rwweib2():
@@ -80,8 +80,9 @@ def build_param_lists(theta_batch, param_names, n_nodes, fixed=None):
 
     Every regional param is set explicitly. Fixed defaults come from
     ``config.RWWEIB2_FIXED`` (falling back to ``_RWWEIB2_REGIONAL_DEFAULT``);
-    the inferred g_FFI/sigma/I_o are taken per-sim from ``theta_batch`` and
-    broadcast to all nodes. g_LRE is the per-sim global scalar.
+    any param present in ``param_names`` (incl g_LRE, now a regional_param) is
+    taken per-sim from ``theta_batch`` and broadcast to all nodes. A precomputed
+    per-(sim,node) ``<name>_matrix`` in ``fixed`` overrides node-by-node.
     """
     import config
 
