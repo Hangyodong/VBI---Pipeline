@@ -107,7 +107,9 @@ variables:
   - {name: dS_I,  type: intermediate_var, description: S_I update}
 
   # Inferred parameters
-  - {name: g_LRE, type: global_param, value: 1.0, description: long-range excitation gain inferred}
+  # g_LRE promoted global_param -> regional_param (per-node) for region-wise
+  # inference. Model now has 0 global_params (see bnm.cu shared-array guard).
+  - {name: g_LRE, type: regional_param, value: 1.0, description: long-range excitation gain inferred}
   - {name: g_FFI, type: regional_param, value: 1.0, description: long-range I-coupling gain inferred}
   - {name: sigma, type: regional_param, value: 0.01, description: noise amplitude inferred}
   - {name: I_o,   type: regional_param, value: 0.382, description: background input current nA inferred}
