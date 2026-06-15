@@ -933,8 +933,8 @@ if (str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
         and getattr(config, "SAVE_PARAM_MAPS", False)):
     from save_param_maps import save_param_maps as _save_maps
     print("\n  [Step 14b] region-wise parameter maps (val + test subjects)")
-    print(f"    NOTE: provisional mode — active params {config.HETERO_PARAMS}; "
-          f"g_LRE is NOT yet regional (global_param; needs cuBNM rebuild).")
+    print(f"    region-wise active params: {config.HETERO_PARAMS} "
+          f"(all regional incl g_LRE; cuBNM rebuilt).")
     _save_maps(
         posterior, feature_pipeline, param_scaler, subject_data,
         list(val) + list(test),
