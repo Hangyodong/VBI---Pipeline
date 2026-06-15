@@ -12,10 +12,10 @@ def save_param_maps(posterior, feature_pipeline, param_scaler, subject_data,
     import config
     from simulator import extract_observed_features
     from inference.posterior import infer_subject_raw
-    from region_basis import build_region_basis
-    from param_decoder import decode_latent_to_param_maps
+    from param_decoder import decode_to_param_maps
     from engine_select import load_network_labels
 
+    mode = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
     labels = load_network_labels()
     hp = list(config.HETERO_PARAMS)
     n_post = n_post or getattr(config, "N_POSTERIOR", 1000)
@@ -28,8 +28,11 @@ def save_param_maps(posterior, feature_pipeline, param_scaler, subject_data,
         x = feature_pipeline.transform(fc_obs_raw, fcd_obs_raw)
         _, zmean, _, _ = infer_subject_raw(
             posterior, x, param_scaler, n_samples=n_post, verbose=False)
-        basis = build_region_basis(d["sc"], labels, config)
-        m = decode_latent_to_param_maps(np.asarray(zmean)[None, :], basis, config)
+        basis = None
+        if mode == "latent_regionwise":
+            from region_basis import build_region_basis
+            basis = build_region_basis(d["sc"], labels, config)
+        m = decode_to_param_maps(np.asarray(zmean)[None, :], basis, config, n_regions=R)
         stacked = np.stack([m[p][0] for p in hp], axis=-1)   # (R, n_active)
         assert stacked.shape == (R, len(hp))
         maps_all.append(stacked)

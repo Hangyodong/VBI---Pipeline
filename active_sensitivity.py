@@ -100,15 +100,32 @@ def report_active_sensitivity(posterior, theta_scaled, param_names,
         print("=" * 64)
         evn = np.abs(e_vals) / (np.abs(e_vals).max() + 1e-12)
         print("  active-direction eigenvalues (norm): "
-              + "  ".join(f"{v:.3f}" for v in evn))
-        print("  top active direction (param loadings):")
-        top = e_vecs[:, 0]
-        for i, p in enumerate(param_names):
-            print(f"    {p:8s} {top[i]:+.3f}")
-        print("  per-parameter sensitivity score (sum=1):")
-        for i, p in enumerate(param_names):
-            bar = "#" * int(round(scores[i] * 40))
-            print(f"    {p:8s} {scores[i]:.3f}  {bar}")
+              + "  ".join(f"{v:.3f}" for v in evn[:min(len(evn), 20)]))
+        if len(param_names) <= 30:
+            print("  top active direction (param loadings):")
+            top = e_vecs[:, 0]
+            for i, p in enumerate(param_names):
+                print(f"    {p:8s} {top[i]:+.3f}")
+            print("  per-parameter sensitivity score (sum=1):")
+            for i, p in enumerate(param_names):
+                bar = "#" * int(round(scores[i] * 40))
+                print(f"    {p:8s} {scores[i]:.3f}  {bar}")
+        else:
+            # region-wise: aggregate sensitivity per HETERO param prefix
+            hetero = []
+            for p in param_names:
+                base = str(p).split("_r")[0].split("_lap")[0].split("_net")[0]
+                base = base[:-5] if base.endswith("_base") else base
+                if base not in hetero:
+                    hetero.append(base)
+            print(f"  per-parameter sensitivity (summed over {len(param_names)} "
+                  f"region-wise coeffs):")
+            for h in hetero:
+                idx = [i for i, p in enumerate(param_names)
+                       if str(p) == h or str(p).startswith(h + "_")]
+                s = float(np.asarray(scores)[idx].sum()) if idx else 0.0
+                bar = "#" * int(round(s * 40))
+                print(f"    {h:8s} {s:.3f}  {bar}")
         print("=" * 64)
     return {"eigenvalues": e_vals, "eigenvectors": e_vecs,
             "param_scores": dict(zip(param_names, scores)), "mode": mode}

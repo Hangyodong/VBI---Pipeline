@@ -21,6 +21,27 @@ import numpy as np  # noqa: E402
 import config  # noqa: E402
 
 
+def _shrinkage_report(param_names, shrink_means, threshold=None):
+    """Per-param shrinkage; aggregate by HETERO param when region-wise (>30)."""
+    thr = threshold if threshold is not None else getattr(
+        config, "DIFFICULT_SHRINKAGE", 0.3)
+    pn = list(param_names)
+    sm = np.asarray(shrink_means, dtype=float)
+    if len(pn) <= 30:
+        for name, s in zip(pn, sm):
+            mark = "OK" if s >= thr else "LOW"
+            print(f"    {name:8s} : {float(s):.4f}  [{mark}]")
+        return
+    from param_decoder import group_indices_by_hetero
+    groups = group_indices_by_hetero(pn, list(getattr(config, "HETERO_PARAMS", [])))
+    for p, idx in groups.items():
+        if not idx:
+            continue
+        v = sm[idx]
+        print(f"    {p:8s} : mean={v.mean():.4f} [{v.min():.4f},{v.max():.4f}] "
+              f"low={int((v < thr).sum())}/{len(idx)}")
+
+
 # ---------------------------------------------------------------------------
 # Two-stage compact summary
 # ---------------------------------------------------------------------------
@@ -394,10 +415,7 @@ def report_step9(stage1_agg, baseline_agg):
         )
     print()
     print("  Shrinkage per param:")
-    for name, s in zip(stage1_agg["param_names"],
-                       stage1_agg["shrinkage_mean"]):
-        mark = "OK" if s >= config.DIFFICULT_SHRINKAGE else "LOW"
-        print(f"    {name:6s} : {float(s):.4f}  [{mark}]")
+    _shrinkage_report(stage1_agg["param_names"], stage1_agg["shrinkage_mean"])
 
 
 def report_step12(stage2_agg):
@@ -412,9 +430,7 @@ def report_step12(stage2_agg):
         print(f"  FCD RMSE   : {stage2_agg['fcd_rmse_mean']:.4f}")
     print()
     print("  Shrinkage per param:")
-    for name, s in zip(stage2_agg["param_names"],
-                       stage2_agg["shrinkage_mean"]):
-        print(f"    {name:6s} : {float(s):.4f}")
+    _shrinkage_report(stage2_agg["param_names"], stage2_agg["shrinkage_mean"])
 
 
 def report_step13(best_stage, score_1, score_2,

@@ -390,10 +390,18 @@ def step7_fit_param_scaler(verbose=True):
     param_scaler = make_stage1_param_scaler()
     prior_scaled = make_scaled_prior(n_p, device=config.SBI_DEVICE)
     if verbose:
-        for name, lo, hi in zip(config.STAGE1_PARAMS,
-                                config.STAGE1_PRIOR_LOW,
-                                config.STAGE1_PRIOR_HIGH):
-            print(f"    {name:6s} : [{lo}, {hi}] -> [-1, 1]")
+        if n_p <= 30:
+            for name, lo, hi in zip(config.STAGE1_PARAMS,
+                                    config.STAGE1_PRIOR_LOW,
+                                    config.STAGE1_PRIOR_HIGH):
+                print(f"    {name:8s} : [{lo}, {hi}] -> [-1, 1]")
+        else:
+            # region-wise (e.g. 1440 params): summarize per HETERO param
+            hp = list(getattr(config, "HETERO_PARAMS", []))
+            print(f"    {n_p} params (region-wise) -> [-1, 1]; "
+                  f"per-param bounds: " + ", ".join(
+                      f"{p}{tuple(getattr(config, 'HETERO_BOUNDS', {}).get(p, ('?','?')))}"
+                      for p in hp))
     return param_scaler, prior_scaled
 
 

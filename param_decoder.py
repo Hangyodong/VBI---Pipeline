@@ -59,6 +59,73 @@ def latent_dim(basis, config):
     return block * len(_hetero_params(config))
 
 
+# ---------------------------------------------------------------------------
+# Direct region-wise (theta_control = all N_REGIONS x len(HETERO) params,
+# no basis). theta layout: [p0_r0..p0_rN, p1_r0..p1_rN, ...] for p in HETERO.
+# ---------------------------------------------------------------------------
+
+def direct_param_names(config, n_regions):
+    """Flat names g_LRE_r000.. for the direct (1440-dim) control vector."""
+    names = []
+    for p in _hetero_params(config):
+        names += [f"{p}_r{i:03d}" for i in range(n_regions)]
+    return names
+
+
+def direct_dim(config, n_regions):
+    return len(_hetero_params(config)) * int(n_regions)
+
+
+def direct_bounds(config, n_regions):
+    """(low, high) lists of length direct_dim; per-region bounds per param."""
+    b = _bounds(config)
+    low, high = [], []
+    for p in _hetero_params(config):
+        lo, hi = b[p]
+        low += [lo] * int(n_regions)
+        high += [hi] * int(n_regions)
+    return low, high
+
+
+def decode_direct_to_param_maps(theta_phys, config, n_regions):
+    """Reshape a PHYSICAL theta (n_sims, len(HETERO)*n_regions) -> per-param maps.
+
+    No basis: the parameter scaler already mapped [-1,1] -> physical bounds, so
+    this is a pure reshape (with a safety clip to the bounds).
+    """
+    z = np.asarray(theta_phys, dtype=np.float64)
+    if z.ndim == 1:
+        z = z[None, :]
+    R = int(n_regions)
+    params = _hetero_params(config)
+    if z.shape[1] != len(params) * R:
+        raise ValueError(f"theta dim {z.shape[1]} != {len(params)*R} "
+                         f"({len(params)} params x {R} regions)")
+    b = _bounds(config)
+    out = {}
+    for k, p in enumerate(params):
+        lo, hi = b[p]
+        m = np.clip(z[:, k * R:(k + 1) * R], lo, hi)
+        out[p] = np.ascontiguousarray(m, dtype=np.float64)
+        assert m.shape == (z.shape[0], R) and np.all(np.isfinite(m))
+    if "sigma" in out:
+        assert out["sigma"].min() >= 0.0
+    return out
+
+
+def decode_to_param_maps(theta, basis, config, n_regions=None):
+    """Dispatch decode by config.PARAMETER_MODE.
+
+    direct_regionwise : theta is PHYSICAL (n_sims, len(HETERO)*n_regions) -> reshape.
+    latent_regionwise : theta is z in [-1,1] (n_sims, latent_dim) -> basis decode.
+    """
+    mode = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+    if mode == "direct_regionwise":
+        R = n_regions if n_regions is not None else basis["laplacian_basis"].shape[0]
+        return decode_direct_to_param_maps(theta, config, R)
+    return decode_latent_to_param_maps(theta, basis, config)
+
+
 def decode_latent_to_param_maps(z_raw, basis, config):
     """z_raw (n_sims, latent_dim) -> {param: (n_sims, n_regions)} region-wise maps."""
     z = np.asarray(z_raw, dtype=np.float64)
@@ -102,6 +169,19 @@ def decode_latent_to_param_maps(z_raw, basis, config):
     if "sigma" in out:
         assert out["sigma"].min() >= 0.0, "negative sigma"
     return out
+
+
+def group_indices_by_hetero(names, hetero):
+    """Map each HETERO param -> list of indices in `names` whose name is that
+    param or starts with '<param>_' (region-wise / coefficient names). Used to
+    aggregate 1440-line per-coefficient reports into per-parameter summaries."""
+    groups = {p: [] for p in hetero}
+    for i, nm in enumerate(names):
+        for p in hetero:
+            if nm == p or str(nm).startswith(p + "_"):
+                groups[p].append(i)
+                break
+    return groups
 
 
 def make_fixed_overrides_from_param_maps(param_maps):

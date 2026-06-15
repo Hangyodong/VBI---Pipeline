@@ -79,7 +79,9 @@ def evaluate_validation_stage1(val_subjects, subject_data, stage1_result,
         results.append(r)
         if verbose:
             shrink = r.get("shrinkage_scaled", [])
-            sk = "[" + ",".join(f"{float(v):.2f}" for v in shrink) + "]"
+            sk = ("[" + ",".join(f"{float(v):.2f}" for v in shrink) + "]"
+                  if len(shrink) <= 12
+                  else f"[mean {float(np.mean(shrink)):.2f} ({len(shrink)} params)]")
             print(
                 f"  [{sid}]  {s_idx + 1}/{n_val}  DONE"
                 f"  FC_corr={r.get('fc_corr_mean', 0.0):.3f}"
@@ -184,7 +186,9 @@ def evaluate_validation_stage2(val_subjects, subject_data, stage2_result,
         results.append(r)
         if verbose:
             shrink = r.get("shrinkage_scaled", [])
-            sk = "[" + ",".join(f"{float(v):.2f}" for v in shrink) + "]"
+            sk = ("[" + ",".join(f"{float(v):.2f}" for v in shrink) + "]"
+                  if len(shrink) <= 12
+                  else f"[mean {float(np.mean(shrink)):.2f} ({len(shrink)} params)]")
             print(
                 f"  [{sid}]  {s_idx + 1}/{n_val}  DONE"
                 f"  FC_corr={r.get('fc_corr_mean', 0.0):.3f}"
@@ -265,7 +269,10 @@ def _print_validation_summary(agg, label):
     print(f"    FC RMSE   : {agg['fc_rmse_mean']:.4f}")
     if getattr(config, "USE_FCD", True):
         print(f"    FCD RMSE  : {agg['fcd_rmse_mean']:.4f}")
-    shrink = dict(zip(
-        agg["param_names"], agg["shrinkage_mean"].round(3),
-    ))
-    print(f"    Shrinkage : {shrink}")
+    if len(agg["param_names"]) <= 12:
+        shrink = dict(zip(agg["param_names"], agg["shrinkage_mean"].round(3)))
+        print(f"    Shrinkage : {shrink}")
+    else:
+        sm = np.asarray(agg["shrinkage_mean"], dtype=float)
+        print(f"    Shrinkage : mean={sm.mean():.3f} "
+              f"[{sm.min():.3f},{sm.max():.3f}] over {len(sm)} params")
