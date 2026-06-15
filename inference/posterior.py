@@ -56,41 +56,43 @@ def infer_subject_raw(posterior, x_obs_input, param_scaler,
     n_samples = n_samples or config.N_POSTERIOR
     _dev = getattr(config, "SBI_DEVICE", "cpu")
     x_t = torch.tensor(x_obs_input, dtype=torch.float32).to(_dev)
-    try:
-        # Prefer rejection (prior-bounded samples → correct metrics), with a
-        # time cap so heavy leakage can't hang the run.
-        samples_scaled = (
-            posterior.sample(
-                (n_samples,), x=x_t, show_progress_bars=False,
-                max_sampling_time=getattr(
-                    config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
-                return_partial_on_timeout=True,
+    # no_grad: high-dim region-wise flows (e.g. 1440-dim) OOM if the autoregressive
+    # inverse tracks gradients during sampling.
+    if _dev == "cuda":
+        torch.cuda.empty_cache()
+    with torch.no_grad():
+        try:
+            # Prefer rejection (prior-bounded samples → correct metrics), with a
+            # time cap so heavy leakage can't hang the run.
+            samples_scaled = (
+                posterior.sample(
+                    (n_samples,), x=x_t, show_progress_bars=False,
+                    max_sampling_time=getattr(
+                        config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
+                    return_partial_on_timeout=True,
+                )
+                .cpu().numpy().astype(np.float32)
             )
-            .cpu().numpy().astype(np.float32)
-        )
-    except RuntimeError:
-        # Near-zero acceptance (empirical FC is out-of-distribution vs the
-        # simulated training FC, so the flow leaks outside the prior box and
-        # rejection collects 0 samples → sbi raises). Fall back to direct
-        # flow sampling, then clip to the prior box [-1, 1] so inverse_transform
-        # yields parameters within prior bounds.
-        samples_scaled = (
-            posterior.sample(
-                (n_samples,), x=x_t, show_progress_bars=False,
-                reject_outside_prior=False,
+        except RuntimeError:
+            # Near-zero acceptance (empirical FC OOD) -> direct flow sampling,
+            # clipped to the prior box [-1, 1].
+            samples_scaled = (
+                posterior.sample(
+                    (n_samples,), x=x_t, show_progress_bars=False,
+                    reject_outside_prior=False,
+                )
+                .detach().cpu().numpy().astype(np.float32)
             )
-            .detach().cpu().numpy().astype(np.float32)
-        )
-        samples_scaled = np.clip(samples_scaled, -1.0, 1.0)
+            samples_scaled = np.clip(samples_scaled, -1.0, 1.0)
 
     samples_raw = param_scaler.inverse_transform(samples_scaled)
     means_raw = samples_raw.mean(axis=0)
     stds_raw = samples_raw.std(axis=0)
 
-    if verbose:
+    if verbose and len(param_scaler.param_names) <= 30:
         for i, name in enumerate(param_scaler.param_names):
             print(
-                f"    {name:6s} = {means_raw[i]:.4f} ± {stds_raw[i]:.4f}"
+                f"    {name:8s} = {means_raw[i]:.4f} ± {stds_raw[i]:.4f}"
             )
     return samples_raw, means_raw, stds_raw, samples_scaled
 

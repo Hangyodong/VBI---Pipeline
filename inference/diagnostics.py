@@ -98,16 +98,17 @@ def simulation_based_calibration(posterior, prior_scaled, param_scaler,
             x_t = torch.tensor(
                 np.atleast_2d(x_obs), dtype=torch.float32, device=_dev,
             )
-            samples_scaled = (
-                posterior.sample(
-                    (n_posterior,), x=x_t, show_progress_bars=False,
-                    # SBC ranks need prior-bounded samples → keep rejection;
-                    # cap time so a leaky iteration can't stall the loop.
-                    max_sampling_time=getattr(
-                        config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
-                    return_partial_on_timeout=True,
-                ).cpu().numpy()
-            )
+            with torch.no_grad():   # high-dim flows OOM if sampling tracks grad
+                samples_scaled = (
+                    posterior.sample(
+                        (n_posterior,), x=x_t, show_progress_bars=False,
+                        # SBC ranks need prior-bounded samples → keep rejection;
+                        # cap time so a leaky iteration can't stall the loop.
+                        max_sampling_time=getattr(
+                            config, "POSTERIOR_MAX_SAMPLING_TIME", 60.0),
+                        return_partial_on_timeout=True,
+                    ).cpu().numpy()
+                )
             rank = (samples_scaled < theta_scaled_all[k]).sum(axis=0)
             ranks.append(rank)
         except Exception as e:           # don't silently swallow ALL draws
