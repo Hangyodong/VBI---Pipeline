@@ -145,14 +145,28 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
 
     if verbose:
         print(f"  [{sid}] posterior:")
-        for i, name in enumerate(param_names):
-            tag = " (low shrinkage)" if (
-                shrink[i] < config.DIFFICULT_SHRINKAGE
-            ) else ""
-            print(
-                f"    {name:6s} = {means_raw[i]:.4f} ± "
-                f"{stds_raw[i]:.4f}  shrinkage={shrink[i]:.3f}{tag}"
-            )
+        if len(param_names) <= 30:
+            for i, name in enumerate(param_names):
+                tag = " (low shrinkage)" if (
+                    shrink[i] < config.DIFFICULT_SHRINKAGE
+                ) else ""
+                print(
+                    f"    {name:8s} = {means_raw[i]:.4f} ± "
+                    f"{stds_raw[i]:.4f}  shrinkage={shrink[i]:.3f}{tag}"
+                )
+        else:
+            # region-wise: aggregate shrinkage per HETERO param (mean over regions)
+            import numpy as _np
+            from param_decoder import group_indices_by_hetero
+            hp = list(getattr(config, "HETERO_PARAMS", []))
+            groups = group_indices_by_hetero(param_names, hp)
+            for p, idx in groups.items():
+                if not idx:
+                    continue
+                sm = _np.asarray(shrink)[idx]
+                print(f"    {p:8s} : shrinkage mean={sm.mean():.3f} "
+                      f"[{sm.min():.3f},{sm.max():.3f}] over {len(idx)} regions "
+                      f"(low={int((sm < config.DIFFICULT_SHRINKAGE).sum())})")
 
     fc_corrs, fc_rmses, fcd_rmses, fc_preds = _resimulate_and_score(
         n_resim, samples_raw, param_names, fixed_overrides,

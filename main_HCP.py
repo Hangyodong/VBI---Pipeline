@@ -392,6 +392,29 @@ if str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise":
     print(f"    SNPE target      : latent z  (BoxUniform[-1,1]^{_ld})")
     print(f"    decoded map shape: (n_sims, {config.N_REGIONS}) per param")
     print("  ============================================================")
+elif str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "direct_regionwise":
+    # Direct region-wise control inference: theta = all N_REGIONS x len(HETERO)
+    # control params (e.g. 360 x 4 = 1440). No basis. Scaler maps [-1,1] <->
+    # per-region physical bounds; the wrapper reshapes theta -> per-region maps.
+    from param_decoder import direct_param_names, direct_dim, direct_bounds
+    _R = int(config.N_REGIONS)
+    _dnames = direct_param_names(config, _R)
+    _dd = direct_dim(config, _R)
+    _low, _high = direct_bounds(config, _R)
+    config.STAGE1_PARAMS      = _dnames
+    config.PARAM_NAMES_STAGE1 = _dnames
+    config.STAGE1_PRIOR_LOW   = _low
+    config.STAGE1_PRIOR_HIGH  = _high
+    print("\n  ===== PARAMETER_MODE = direct_regionwise =====")
+    print(f"    target FC mode   : {'group-avg' if config.GROUP_AVG_FC else 'subject-specific'}")
+    print(f"    control params   : {config.HETERO_PARAMS} (each per-region)")
+    print(f"    regions          : {_R}")
+    print(f"    theta_control dim : {_dd}  (= {len(config.HETERO_PARAMS)} params x {_R} regions)")
+    print(f"    SNPE target      : theta_control (BoxUniform[-1,1]^{_dd} -> physical bounds)")
+    print(f"    decoded map shape: (n_sims, {_R}) per param  (reshape, no basis)")
+    print("    NOTE: 1440-dim posterior is high-dim; expect low identifiability "
+          "(check shrinkage/ActiveSubspace/SBC).")
+    print("  ============================================================")
 
 
 # ## Train data: weights / tract lengths / empirical FC
@@ -500,16 +523,19 @@ import json as _json
 
 def _cache_meta_now():
     """Cache-identity metadata. Mismatch => stale (never mix modes/targets)."""
-    _lat = str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
+    _pm = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+    _rw = _pm in ("latent_regionwise", "direct_regionwise")
+    _basis = config.BASIS_TYPE if _pm == "latent_regionwise" else None
+    _nlap = int(config.N_LAPLACIAN_BASIS) if _pm == "latent_regionwise" else None
     return {
         "target_fc_mode": "group" if config.GROUP_AVG_FC else "subject",
         "PARAMETER_MODE": config.PARAMETER_MODE,
         "N_REGIONS": int(config.N_REGIONS),
         "FC_DIM": int(config.FC_DIM),
-        "hetero_params": list(config.HETERO_PARAMS) if _lat else [],
-        "basis_type": config.BASIS_TYPE if _lat else None,
-        "n_laplacian_basis": int(config.N_LAPLACIAN_BASIS) if _lat else None,
-        "latent_dim": len(config.STAGE1_PARAMS) if _lat else None,
+        "hetero_params": list(config.HETERO_PARAMS) if _rw else [],
+        "basis_type": _basis,
+        "n_laplacian_basis": _nlap,
+        "latent_dim": len(config.STAGE1_PARAMS) if _rw else None,
         "model": config.INFERENCE_MODEL,
     }
 
@@ -776,43 +802,47 @@ prior_std = 1.0
 shrink_1 = 1 - (samples_1.std(axis=0) / prior_std) ** 2
 shrink_2 = 1 - (samples_2.std(axis=0) / prior_std) ** 2
 
-# ── 2. Shrinkage 요약 (global scalars) ──
+# ── 2. Shrinkage 요약 ──
 print("\n[Shrinkage]")
 names = config.STAGE1_PARAMS
-def _per(s):
-    return "  ".join(f"{n}={v:.3f}" for n, v in zip(names, s))
-print(f"  Phase 2 mean: {shrink_1.mean():.3f}  ({_per(shrink_1)})")
-print(f"  Phase 4 mean: {shrink_2.mean():.3f}  ({_per(shrink_2)})")
-
-# ── 3. 복원된 파라미터 (posterior mean, raw space) ──
-# 전역 스칼라 (P/Q/g_e/g_i/c_ei)
-raw_2  = param_scaler.inverse_transform(samples_2)     # (n_samples, P)
+_BIG = len(names) > 30          # region-wise (e.g. 1440) -> aggregate, no per-param plot
+raw_2  = param_scaler.inverse_transform(samples_2)
 mean_2 = raw_2.mean(axis=0)
 std_2  = raw_2.std(axis=0)
-print("\n[복원된 파라미터 (posterior mean, raw)]")
-for n, m, s in zip(config.STAGE1_PARAMS, mean_2, std_2):
-    print(f"  {n:5s}: mean={m:.3f}  std={s:.3f}")
-
-# ── 4. Phase 2 vs Phase 4 posterior 분포 비교 ──
-plot_data = [(samples_1[:, i], samples_2[:, i], n)
-             for i, n in enumerate(config.STAGE1_PARAMS)]
-
-fig, axes = plt.subplots(1, len(plot_data),
-                         figsize=(5 * len(plot_data), 4), squeeze=False)
-for ax, (d1, d2, label) in zip(axes[0], plot_data):
-    ax.boxplot([d1, d2],
-               labels=['Phase2\n(raw FC)', 'Phase4\n(selected FC)'])
-    ax.set_title(label)
-    ax.set_ylabel('scaled value')
-    ax.axhline(0, color='gray', lw=0.5, ls='--')
-plt.suptitle('Posterior distribution: Phase2 vs Phase4')
-plt.tight_layout()
-plt.savefig(
-    f"{config.OUTPUT_DIR}/phase2_vs_phase4_posterior.png",
-    dpi=110, bbox_inches='tight'
-)
-plt.show()
-print("[저장] phase2_vs_phase4_posterior.png")
+if not _BIG:
+    def _per(s):
+        return "  ".join(f"{n}={v:.3f}" for n, v in zip(names, s))
+    print(f"  Phase 2 mean: {shrink_1.mean():.3f}  ({_per(shrink_1)})")
+    print(f"  Phase 4 mean: {shrink_2.mean():.3f}  ({_per(shrink_2)})")
+    print("\n[복원된 파라미터 (posterior mean, raw)]")
+    for n, m, s in zip(config.STAGE1_PARAMS, mean_2, std_2):
+        print(f"  {n:8s}: mean={m:.3f}  std={s:.3f}")
+    plot_data = [(samples_1[:, i], samples_2[:, i], n)
+                 for i, n in enumerate(config.STAGE1_PARAMS)]
+    fig, axes = plt.subplots(1, len(plot_data),
+                             figsize=(5 * len(plot_data), 4), squeeze=False)
+    for ax, (d1, d2, label) in zip(axes[0], plot_data):
+        ax.boxplot([d1, d2], labels=['Phase2', 'Phase4'])
+        ax.set_title(label); ax.set_ylabel('scaled value')
+        ax.axhline(0, color='gray', lw=0.5, ls='--')
+    plt.suptitle('Posterior: Phase2 vs Phase4'); plt.tight_layout()
+    plt.savefig(f"{config.OUTPUT_DIR}/phase2_vs_phase4_posterior.png",
+                dpi=110, bbox_inches='tight')
+    plt.close()
+    print("[저장] phase2_vs_phase4_posterior.png")
+else:
+    # region-wise: aggregate shrinkage + restored params per HETERO param
+    from param_decoder import group_indices_by_hetero
+    print(f"  Phase 2 mean: {shrink_1.mean():.3f}  Phase 4 mean: {shrink_2.mean():.3f}"
+          f"  ({len(names)} region-wise params)")
+    groups = group_indices_by_hetero(names, list(config.HETERO_PARAMS))
+    print("  per-HETERO-param (shrinkage mean[min,max] | restored mean±std over regions):")
+    for p, idx in groups.items():
+        if not idx:
+            continue
+        sm = shrink_2[idx]
+        print(f"    {p:8s}: shrink {sm.mean():.3f}[{sm.min():.3f},{sm.max():.3f}] | "
+              f"raw {mean_2[idx].mean():.4f}±{std_2[idx].mean():.4f}")
 
 
 # ## Step 9. Stage 1 analysis (validation)
@@ -830,18 +860,26 @@ baseline_agg = evaluate.baseline_eval_subjects(
     val, subject_data, n_resim=10, verbose=True,
 )
 
-inference.evaluate_embedding_probing(
-    s1["embedding_net"], s1["theta_scaled"],
-    s1["x_input"], config.STAGE1_PARAMS, verbose=True,
-)
+# Region-wise (e.g. 1440 params): per-param probing/plots explode (1440 fits /
+# subplots). Skip those; ActiveSubspace aggregates internally; SBC ranks still
+# computed (used for aggregate diagnostics) but the per-param histogram is skipped.
+_BIG_P = len(config.STAGE1_PARAMS) > 30
 
-# Library-native (sbi) gradient sensitivity: which params the posterior is
-# most sensitive to at a real observation. Complements the linear probing R².
+if not _BIG_P:
+    inference.evaluate_embedding_probing(
+        s1["embedding_net"], s1["theta_scaled"],
+        s1["x_input"], config.STAGE1_PARAMS, verbose=True,
+    )
+else:
+    print(f"  [probing] skipped ({len(config.STAGE1_PARAMS)} region-wise params; "
+          f"per-param linear probe not informative at this dim)")
+
+# Library-native (sbi) gradient sensitivity (internally aggregates if region-wise).
 try:
     from active_sensitivity import report_active_sensitivity
     report_active_sensitivity(
         s1["posterior"], s1["theta_scaled"], config.STAGE1_PARAMS,
-        x_obs=fc_vec_0,                       # train[0] FC (already computed)
+        x_obs=fc_vec_0,
         num_monte_carlo_samples=1000, verbose=True,
     )
 except Exception as _e:
@@ -854,14 +892,21 @@ sbc_ranks = inference.simulation_based_calibration(
     delays=subject_data[train[0]]["delays"],
     n_sbc=config.N_SBC, n_posterior=1000,
 )
-evaluate.plot_sbc_rank_histogram(sbc_ranks, config.STAGE1_PARAMS)
-evaluate.plot_posteriors(
-    stage1_agg["per_subject"],
-    config.STAGE1_PARAMS,
-    config.STAGE1_PRIOR_LOW,
-    config.STAGE1_PRIOR_HIGH,
-    title="Stage 1",
-)
+if not _BIG_P:
+    evaluate.plot_sbc_rank_histogram(sbc_ranks, config.STAGE1_PARAMS)
+    evaluate.plot_posteriors(
+        stage1_agg["per_subject"],
+        config.STAGE1_PARAMS,
+        config.STAGE1_PRIOR_LOW,
+        config.STAGE1_PRIOR_HIGH,
+        title="Stage 1",
+    )
+else:
+    import numpy as _np
+    _sbc = _np.asarray(sbc_ranks)
+    print(f"  [SBC] {_sbc.shape[0]} sims x {_sbc.shape[1]} params ranked "
+          f"(per-param histogram skipped for region-wise); "
+          f"rank mean={_sbc.mean():.1f}")
 
 # Result
 evaluate.report_step9(stage1_agg, baseline_agg)
@@ -928,13 +973,14 @@ evaluate.plot_fc_comparison(
 # Result
 evaluate.report_step14(test_summary)
 
-# ── Region-wise parameter maps (latent_regionwise mode) ─────────────────────
-if (str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "latent_regionwise"
+# ── Region-wise parameter maps (latent_regionwise or direct_regionwise) ─────
+if (str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+        in ("latent_regionwise", "direct_regionwise")
         and getattr(config, "SAVE_PARAM_MAPS", False)):
     from save_param_maps import save_param_maps as _save_maps
     print("\n  [Step 14b] region-wise parameter maps (val + test subjects)")
-    print(f"    region-wise active params: {config.HETERO_PARAMS} "
-          f"(all regional incl g_LRE; cuBNM rebuilt).")
+    print(f"    mode={config.PARAMETER_MODE}  active params: {config.HETERO_PARAMS} "
+          f"(all regional incl g_LRE).")
     _save_maps(
         posterior, feature_pipeline, param_scaler, subject_data,
         list(val) + list(test),
