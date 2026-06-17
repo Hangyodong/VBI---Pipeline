@@ -44,7 +44,7 @@ cfg = PipelineConfig(
     DATA_DIR   = "/scratch/home/wog3597/vbi",
     OUTPUT_DIR = "./output_hcp",
     FC_FILE    = "HCP_FC.mat",       # var 'C' (n,2): col0 id, col1 FC(381,381)
-    SC_FILE    = "HCP_SC.mat",       # var 'data' (3,n): id / weights / lengths (v7.3)
+    SC_FILE    = os.environ.get("SC_FILE", "HCP_SC.mat"),  # CABNP: HCP_CABNP381_SC_first100.mat
 
     # ── Atlas / regions ──────────────────────────────────────
     N_REGIONS  = 360,                # cortical-only (Glasser 360; drop 21 subcortical). FC_DIM auto = 64620
@@ -127,6 +127,17 @@ config.N_LAPLACIAN_BASIS  = int(os.environ.get("N_LAPLACIAN_BASIS", "4"))
 config.USE_NETWORK_BASIS  = True
 config.SAVE_PARAM_MAPS    = True
 config.NETWORK_LABELS_CSV = None    # optional atlas network labels (row-aligned); None -> const+Laplacian only
+# basis_regionwise: SBI infers basis coefficients (theta_dim=n_params x basis_dim);
+# BasisParamDecoder maps them via map=mid+half*tanh(basis@beta). basis.npy=[const,
+# myelin,gradient] (381,3). bounds below override HETERO_BOUNDS in that mode.
+config.BASIS_PATH         = os.environ.get("BASIS_PATH", "basis.npy")
+config.BASIS_REZSCORE     = True
+config.BASIS_BOUNDS       = {"g_LRE": (0.0, 3.0), "g_FFI": (0.0, 3.0),
+                             "I_o": (0.0, 1.0), "sigma": (0.0, 0.05)}
+config.BASIS_COEFF_PRIOR  = (-2.0, 2.0)
+# SC dataset: "hcp_v73" (HCP_SC.mat, h5py) | "cabnp381" (HCP_CABNP381_SC_first100.mat,
+# 3D weight_all/tract_length_all; FC still from HCP_FC.mat).
+config.SC_DATASET         = os.environ.get("SC_DATASET", "hcp_v73")
 config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by final_test (uses Phase1) and hurt NLL (-6.12 vs -8.49) -> skip
 # ④ per-subject SC conditioning in the embedding (true amortization). Core is
 # implemented + CPU-verified in inference/embedding.py (per_subject_sc path) and
@@ -135,7 +146,7 @@ config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by f
 config.EMBED_PER_SUBJECT_SC = False
 config.VELOCITY_M_PER_S   = 3.0                # human conduction velocity (m/s)
 config.USE_FCD            = False              # HCP FC only (no FCD)
-config.USE_DELAYS         = False              # enable later if needed (~9x sim cost)
+config.USE_DELAYS         = (os.environ.get("USE_DELAYS", "0") == "1")  # tract-length delays (~9x sim cost)
 
 import data_loader_hcp as data_loader          # <-- HCP loader (drop-in)
 import evaluate
@@ -415,6 +426,29 @@ elif str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "direct_regionwise
     print("    NOTE: 1440-dim posterior is high-dim; expect low identifiability "
           "(check shrinkage/ActiveSubspace/SBC).")
     print("  ============================================================")
+elif str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "basis_regionwise":
+    # Identifiable Kong-style: SBI infers basis coefficients (theta_dim =
+    # n_params x basis_dim, e.g. 4x3=12). BasisParamDecoder maps them to bounded
+    # region-wise maps via mid+half*tanh(basis@beta). bounds = BASIS_BOUNDS.
+    config.HETERO_BOUNDS = dict(config.BASIS_BOUNDS)
+    from basis_decoder import get_decoder
+    _dec = get_decoder(config)
+    config.STAGE1_PARAMS      = _dec.coeff_names()
+    config.PARAM_NAMES_STAGE1 = config.STAGE1_PARAMS
+    _clo, _chi = config.BASIS_COEFF_PRIOR
+    config.STAGE1_PRIOR_LOW   = [_clo] * _dec.theta_dim
+    config.STAGE1_PRIOR_HIGH  = [_chi] * _dec.theta_dim
+    print("\n  ===== PARAMETER_MODE = basis_regionwise (myelin/gradient) =====")
+    print(f"    target FC mode   : {'group-avg' if config.GROUP_AVG_FC else 'subject-specific'}")
+    print(f"    SC dataset       : {config.SC_DATASET}   delays={config.USE_DELAYS}")
+    print(f"    control params   : {config.HETERO_PARAMS}  bounds={config.HETERO_BOUNDS}")
+    print(f"    basis            : {config.BASIS_PATH}  (regions={_dec.n_regions}, "
+          f"basis_dim={_dec.basis_dim})")
+    print(f"    theta dim        : {_dec.theta_dim}  (= {_dec.n_params} params x "
+          f"{_dec.basis_dim} basis)  prior Uniform{config.BASIS_COEFF_PRIOR}")
+    print(f"    decoded map shape: (n_sims, {_dec.n_regions}) per param  "
+          f"(mid+half*tanh(basis@beta))")
+    print("  ============================================================")
 
 
 # ## Train data: weights / tract lengths / empirical FC
@@ -524,8 +558,10 @@ import json as _json
 def _cache_meta_now():
     """Cache-identity metadata. Mismatch => stale (never mix modes/targets)."""
     _pm = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
-    _rw = _pm in ("latent_regionwise", "direct_regionwise")
-    _basis = config.BASIS_TYPE if _pm == "latent_regionwise" else None
+    _rw = _pm in ("latent_regionwise", "direct_regionwise", "basis_regionwise")
+    _basis = (config.BASIS_TYPE if _pm == "latent_regionwise"
+              else (os.path.basename(config.BASIS_PATH)
+                    if _pm == "basis_regionwise" else None))
     _nlap = int(config.N_LAPLACIAN_BASIS) if _pm == "latent_regionwise" else None
     return {
         "target_fc_mode": "group" if config.GROUP_AVG_FC else "subject",
@@ -780,7 +816,7 @@ from features.fc import fc_to_upper_tri
 # many draws WITH autograd on (the autoregressive inverse builds a huge graph).
 # Sample under no_grad and cap the count for region-wise modes.
 _RW = str(getattr(config, "PARAMETER_MODE", "homogeneous")) in (
-    "latent_regionwise", "direct_regionwise")
+    "latent_regionwise", "direct_regionwise", "basis_regionwise")
 n_samples = min(config.N_POSTERIOR, 512) if _RW else config.N_POSTERIOR
 fc_obs_0  = subject_data[train[0]]["fc"]
 fc_vec_0  = fc_to_upper_tri(fc_obs_0)
@@ -983,7 +1019,7 @@ evaluate.report_step14(test_summary)
 
 # ── Region-wise parameter maps (latent_regionwise or direct_regionwise) ─────
 if (str(getattr(config, "PARAMETER_MODE", "homogeneous"))
-        in ("latent_regionwise", "direct_regionwise")
+        in ("latent_regionwise", "direct_regionwise", "basis_regionwise")
         and getattr(config, "SAVE_PARAM_MAPS", False)):
     from save_param_maps import save_param_maps as _save_maps
     print("\n  [Step 14b] region-wise parameter maps (val + test subjects)")

@@ -105,6 +105,24 @@ class BasisParamDecoder:
                 for p, m in param_maps.items()}
 
 
+_DECODER_CACHE = {}
+
+
+def get_decoder(config):
+    """Cached BasisParamDecoder built from config (BASIS_PATH, N_REGIONS,
+    HETERO_PARAMS, HETERO_BOUNDS)."""
+    path = getattr(config, "BASIS_PATH", "basis.npy")
+    R = int(config.N_REGIONS)
+    params = tuple(config.HETERO_PARAMS)
+    bounds = getattr(config, "HETERO_BOUNDS", None)
+    key = (path, R, params)
+    if key not in _DECODER_CACHE:
+        _DECODER_CACHE[key] = BasisParamDecoder.from_file(
+            path, list(params), bounds=bounds, n_regions=R,
+            rezscore=bool(getattr(config, "BASIS_REZSCORE", True)))
+    return _DECODER_CACHE[key]
+
+
 def qc_decode(decoder, thetas, save_dir=None, tag="qc", verbose=True):
     """Decode theta sample(s), report per-param map stats, save param_maps/*.npy."""
     t = np.asarray(thetas, dtype=np.float64)

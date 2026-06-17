@@ -69,7 +69,7 @@ def load_network_labels():
 
 
 def _regionwise_modes():
-    return ("latent_regionwise", "direct_regionwise")
+    return ("latent_regionwise", "direct_regionwise", "basis_regionwise")
 
 
 def latent_wrap(base_sim):
