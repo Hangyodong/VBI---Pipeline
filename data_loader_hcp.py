@@ -66,6 +66,18 @@ def load_raw_data():
     """
     print("  [HCP data loading]")
     C, fc_ids = _load_hcp_fc(config.FC_PATH)
+    # CAB-NP 381 dataset: SC weights + tract lengths are 3D arrays (not v7.3 refs);
+    # FC still comes from HCP_FC.mat (subjects matched by id).
+    if str(getattr(config, "SC_DATASET", "hcp_v73")) == "cabnp381":
+        global _CABNP
+        _CABNP = _load_cabnp(config.SC_PATH)
+        sc_ids = list(_CABNP["idmap"].keys())
+        n = config.N_REGIONS
+        print(f"  FC: {C.shape[0]} subjects (HCP_FC.mat) | "
+              f"SC: CAB-NP {len(sc_ids)} subjects, 381 regions (weight+tract_length 3D)")
+        if 381 > n:
+            print(f"  [cortical-only] slicing 381 -> first {n} regions")
+        return None, C, "CABNP", fc_ids, sc_ids, None, None
     sc_ids = _decode_sc_ids(config.SC_PATH)
     n = config.N_REGIONS
     expected = n * (n - 1) // 2
@@ -152,6 +164,47 @@ def _build_subject_data(sid, fc_mat, fc_index, h5f, sc_refs, sc_index, n):
     }
 
 
+# ---- CAB-NP 381 dataset (3D weight_all / tract_length_all) -----------------
+_CABNP = None
+
+
+def _load_cabnp(path):
+    """Load HCP_CABNP381_SC_first100.mat: weight_all/tract_length_all (R,R,S) +
+    subject_id. Returns {weight_all, tract_length_all, idmap:{id->idx}}."""
+    import scipy.io as sio
+    m = sio.loadmat(path)
+    W = np.asarray(m["weight_all"], dtype=np.float64)            # (381,381,nsub)
+    L = np.asarray(m["tract_length_all"], dtype=np.float64)
+    sids = [int(str(np.asarray(m["subject_id"][i, 0]).flatten()[0]))
+            for i in range(m["subject_id"].shape[0])]
+    return {"weight_all": W, "tract_length_all": L,
+            "idmap": {s: i for i, s in enumerate(sids)}}
+
+
+def _build_subject_data_cabnp(sid, fc_mat, fc_index, n):
+    """One subject from the CAB-NP 3D arrays (SC/length) + HCP_FC.mat (FC)."""
+    fc_raw = _cortical_slice(
+        np.asarray(fc_mat[fc_index[sid], config.FC_COL]).astype(np.float64), n)
+    assert fc_raw.shape == (n, n), f"{sid}: FC shape {fc_raw.shape} != ({n},{n})"
+    fc_nan = np.isnan(fc_raw)
+    fc = np.nan_to_num(fc_raw, nan=0.0); fc = (fc + fc.T) / 2.0
+    np.fill_diagonal(fc, 0.0)
+    fcd = np.zeros((n, n), dtype=np.float64)
+
+    idx = _CABNP["idmap"][int(sid)]
+    w_raw = _cortical_slice(_CABNP["weight_all"][:, :, idx], n)
+    sc = (w_raw + w_raw.T) / 2.0
+    sc = _scale_weights(sc).astype(np.float64)
+    len_raw = _cortical_slice(_CABNP["tract_length_all"][:, :, idx], n)
+    lengths_mm = (len_raw + len_raw.T) / 2.0
+    np.fill_diagonal(lengths_mm, 0.0)
+    lengths_mm = lengths_mm.astype(np.float32)
+    delays = compute_delay_matrix(sc, config.VELOCITY_M_PER_S, lengths_mm=lengths_mm)
+    assert sc.shape == (n, n) and np.isfinite(delays).all(), f"{sid}: bad SC/delays"
+    return {"fc": fc, "fcd": fcd, "fc_nan": fc_nan,
+            "sc": sc, "lengths_mm": lengths_mm, "delays": delays}
+
+
 def _compute_group_fc(fc_mat, fc_ids, n):
     """Group-averaged FC (cortical-sliced) over ALL HCP subjects.
 
@@ -182,30 +235,36 @@ def load_all_subjects(subjects, fc_mat, sc_mat, fc_ids, sc_ids,
     When ``config.GROUP_AVG_FC`` is set, every subject's FC target is replaced
     by the group-averaged FC (computed over all subjects); SC stays per-subject.
     """
-    import h5py
     n = config.N_REGIONS
     fc_index = {int(s): i for i, s in enumerate(fc_ids)}
     data = {}
-    with h5py.File(sc_mat, "r") as f:
-        sc_refs = f["data"]                          # (3, nsub) refs
-        sc_index = {}
-        for j in range(sc_refs.shape[1]):
-            a = np.asarray(f[sc_refs[0, j]][()]).flatten()
-            sc_index[int("".join(chr(int(x)) for x in a))] = j
+    _cabnp = str(getattr(config, "SC_DATASET", "hcp_v73")) == "cabnp381"
+
+    def _log_subj(sid, d):
+        n_edges = int((d["sc"] > 0).sum())
+        lpos = d["lengths_mm"][d["lengths_mm"] > 0]
+        dl = d["delays"][d["delays"] > 0]
+        print(f"    {sid}: SC nnz={n_edges}, FC NaN={int(d['fc_nan'].sum())}, "
+              f"len=[{lpos.min():.1f},{lpos.max():.1f}]mm, "
+              f"delay=[{(dl.min() if dl.size else 0):.2f},"
+              f"{(dl.max() if dl.size else 0):.2f}]ms")
+
+    if _cabnp:
         for sid in subjects:
-            data[sid] = _build_subject_data(
-                int(sid), fc_mat, fc_index, f, sc_refs, sc_index, n
-            )
-            d = data[sid]
-            n_edges = int((d["sc"] > 0).sum())
-            lpos = d["lengths_mm"][d["lengths_mm"] > 0]
-            dl = d["delays"][d["delays"] > 0]
-            print(
-                f"    {sid}: SC nnz={n_edges}, FC NaN={int(d['fc_nan'].sum())}, "
-                f"len=[{lpos.min():.1f},{lpos.max():.1f}]mm, "
-                f"delay=[{(dl.min() if dl.size else 0):.2f},"
-                f"{(dl.max() if dl.size else 0):.2f}]ms"
-            )
+            data[sid] = _build_subject_data_cabnp(int(sid), fc_mat, fc_index, n)
+            _log_subj(sid, data[sid])
+    else:
+        import h5py
+        with h5py.File(sc_mat, "r") as f:
+            sc_refs = f["data"]                          # (3, nsub) refs
+            sc_index = {}
+            for j in range(sc_refs.shape[1]):
+                a = np.asarray(f[sc_refs[0, j]][()]).flatten()
+                sc_index[int("".join(chr(int(x)) for x in a))] = j
+            for sid in subjects:
+                data[sid] = _build_subject_data(
+                    int(sid), fc_mat, fc_index, f, sc_refs, sc_index, n)
+                _log_subj(sid, data[sid])
 
     if getattr(config, "GROUP_AVG_FC", False):
         gfc = _compute_group_fc(fc_mat, fc_ids, n)

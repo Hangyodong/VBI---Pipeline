@@ -120,6 +120,9 @@ def decode_to_param_maps(theta, basis, config, n_regions=None):
     latent_regionwise : theta is z in [-1,1] (n_sims, latent_dim) -> basis decode.
     """
     mode = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+    if mode == "basis_regionwise":
+        from basis_decoder import get_decoder
+        return get_decoder(config).decode(theta)
     if mode == "direct_regionwise":
         R = n_regions if n_regions is not None else basis["laplacian_basis"].shape[0]
         return decode_direct_to_param_maps(theta, config, R)

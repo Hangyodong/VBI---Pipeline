@@ -88,7 +88,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
         )
     # region-wise mode: decode control vector -> per-region param maps before sim.
     _pmode = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
-    _latent = _pmode in ("latent_regionwise", "direct_regionwise")
+    _latent = _pmode in ("latent_regionwise", "direct_regionwise", "basis_regionwise")
     if _latent:
         from engine_select import latent_wrap
         simulate_gpu_batch = latent_wrap(simulate_gpu_batch)
