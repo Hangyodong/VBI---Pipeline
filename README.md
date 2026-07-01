@@ -6,12 +6,11 @@ GPU forward simulation via **cuBNM**, amortized posterior via **sbi**.
 Infers region-wise RWW-EIB parameters — encoded as **myelin/gradient basis
 coefficients** — from HCP functional connectivity (FC).
 
-Two entrypoints:
-- **`main_HCP.py`** — HCP human, **RWWEIB_2CPL** model, 360 cortical regions. (canonical / active)
-- **`main.py`** — mouse MPTP, Wilson-Cowan model, 115 regions. (legacy)
+Entrypoint: **`main_HCP.py`** — HCP human, **RWWEIB_2CPL** model, 360 cortical
+regions.
 
-> **Source of truth = code + config.** Detailed, verified pipeline docs:
-> [`CLAUDE.md`](CLAUDE.md) + [`docs/current_pipeline.md`](docs/current_pipeline.md).
+> **Source of truth = code + config.** This repo is trimmed to only the code
+> and assets used by the full `main_HCP.py` run.
 
 ---
 
@@ -69,7 +68,7 @@ map = mid + half·tanh(z)        # mid=(lo+hi)/2, half=(hi-lo)/2
 ```
 Basis bounds (`BASIS_BOUNDS`): `g_LRE(0,3) g_FFI(0,3) I_o(...) sigma(0,0.05)`.
 Prior: scaled `BoxUniform[-1,1]^12`; raw coeff `(-2,2)`. `theta=0` → param
-midpoints. Bounds/coeff-order are load-bearing — see `CLAUDE.md`.
+midpoints. Bounds/coeff-order are load-bearing — see `basis_decoder.py`.
 
 ### Dataflow (one line)
 ```
@@ -123,18 +122,8 @@ separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
 | `inference/feature_pipeline.py` | FC PCA-256 whiten |
 | `inference/snpe.py`           | SNPE-C; `nn.Identity` embedding; MAF |
 | `evaluation/`                 | validation/test metrics, plots (engine-routed) |
-| `docs/current_pipeline.md`    | full per-stage documentation |
 
 ---
-
-## Legacy mouse pipeline (`main.py`)
-
-Mouse MPTP, Wilson-Cowan, 115 regions, FC+FCD features, 14-step driver.
-```bash
-python main.py
-python debug.py --basic   # quick checks, no GPU
-```
-Data: `MPTP_FC_115.mat` (FC col 1, FCD col 2), `MPTP_SC_115.mat` (SC col 1).
 
 ## Style
 All modules conform to `pycodestyle --max-line-length=88`.
