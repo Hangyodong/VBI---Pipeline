@@ -177,13 +177,16 @@ def get_decoder_for_basis(basis_array, params, bounds=None, rezscore=True):
     return _PERSUBJ_DEC_CACHE[key]
 
 
-def build_persubject_bases(sc_file, myelin_path="myelin_subjects.npy",
-                           gradient_path="gradient_subjects.npy", n_regions=360):
+def build_persubject_bases(sc_file, myelin_path="HCP_Data/myelin_subjects.npy",
+                           gradient_path="HCP_Data/gradient_subjects_cortex.npy",
+                           n_regions=360):
     """{subject_id -> (n_regions,3) raw basis [const, myelin_s, gradient_s]}.
 
-    Rows of myelin/gradient_subjects.npy are aligned to the SC file's `sub_num`
+    Rows of myelin/gradient_subjects are aligned to the SC file's `sub_num`
     (ascending subject id) — user-confirmed. const=ones; rezscore is applied later
-    in get_decoder_for_basis (per-subject, on the n_regions slice)."""
+    in get_decoder_for_basis (per-subject, on the n_regions slice). Each column is
+    sliced to n_regions independently so myelin (381) and the cortex-only gradient
+    (360) can differ in native width."""
     import scipy.io as sio
     d = sio.loadmat(sc_file)
     sub_num = np.asarray(d["sub_num"]).ravel().astype(int)
@@ -191,9 +194,12 @@ def build_persubject_bases(sc_file, myelin_path="myelin_subjects.npy",
     if not (len(sub_num) == my.shape[0] == gr.shape[0]):
         raise ValueError(f"row mismatch: sub_num={len(sub_num)} "
                          f"myelin={my.shape} gradient={gr.shape}")
-    R_full = my.shape[1]
+    if my.shape[1] < n_regions or gr.shape[1] < n_regions:
+        raise ValueError(f"too few regions: myelin={my.shape} gradient={gr.shape} "
+                         f"need >= {n_regions}")
     out = {}
     for i, sid in enumerate(sub_num):
-        basis = np.column_stack([np.ones(R_full), my[i], gr[i]])[:n_regions]
+        basis = np.column_stack([np.ones(n_regions),
+                                 my[i, :n_regions], gr[i, :n_regions]])
         out[int(sid)] = np.ascontiguousarray(basis, dtype=np.float64)
     return out
