@@ -27,6 +27,7 @@ import config
 # reuse format-agnostic helpers from the MPTP loader
 from data_loader import _scale_weights, three_way_split, four_way_split  # noqa: F401
 from simulation.delays import compute_delay_matrix
+from simulation.geometry import augment_sc_geometry
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +148,7 @@ def _build_subject_data(sid, fc_mat, fc_index, h5f, sc_refs, sc_index, n):
     assert w_raw.shape == (n, n), f"{sid}: SC weight shape {w_raw.shape}"
     sc = (w_raw + w_raw.T) / 2.0
     sc = _scale_weights(sc).astype(np.float64)
+    sc = augment_sc_geometry(sc, config)  # gated homotopic prior (no-op if OFF)
 
     len_raw = _cortical_slice(np.asarray(h5f[sc_refs[2, col]][()]).astype(np.float64), n)
     assert len_raw.shape == (n, n), f"{sid}: SC length shape {len_raw.shape}"
@@ -195,6 +197,7 @@ def _build_subject_data_cabnp(sid, fc_mat, fc_index, n):
     w_raw = _cortical_slice(_CABNP["weight_all"][:, :, idx], n)
     sc = (w_raw + w_raw.T) / 2.0
     sc = _scale_weights(sc).astype(np.float64)
+    sc = augment_sc_geometry(sc, config)  # gated homotopic prior (no-op if OFF)
     len_raw = _cortical_slice(_CABNP["tract_length_all"][:, :, idx], n)
     lengths_mm = (len_raw + len_raw.T) / 2.0
     np.fill_diagonal(lengths_mm, 0.0)

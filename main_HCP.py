@@ -39,36 +39,51 @@ def _envi(name, default):
     v = os.environ.get(name)
     return int(v) if v not in (None, "") else default
 
+# ── SMOKE toggle ─────────────────────────────────────────────
+# SMOKE = tiny end-to-end run (few subjects, few sims) to check the pipeline
+# wires + runs without crashing. Flip to False (or env SMOKE=0) for the REAL run.
+# Only the SIZES change; dataset/model config (cabnp381 + tract delays +
+# per-subject FC) is the same in both. Startup banner prints the active sizes.
+SMOKE = (os.environ.get("SMOKE", "1") != "0")
+if SMOKE:
+    print(">>> SMOKE=1: tiny run (N_SUBJECTS=4/N_TRAIN=2/N_SIM=64). "
+          "Set SMOKE=0 for the real run. <<<")
+
 cfg = PipelineConfig(
     # ── Paths (HCP) ──────────────────────────────────────────
     DATA_DIR   = "/scratch/home/wog3597/vbi",
     OUTPUT_DIR = "./output_hcp",
     FC_FILE    = "HCP_FC.mat",       # var 'C' (n,2): col0 id, col1 FC(381,381)
-    SC_FILE    = os.environ.get("SC_FILE", "HCP_SC.mat"),  # CABNP: HCP_CABNP381_SC_first100.mat
+    SC_FILE    = os.environ.get("SC_FILE", "HCP_CABNP381_SC_first100.mat"),  # CAB-NP 381 SC
 
     # ── Atlas / regions ──────────────────────────────────────
     N_REGIONS  = 360,                # cortical-only (Glasser 360; drop 21 subcortical). FC_DIM auto = 64620
 
     # ── Subject pool & split ─────────────────────────────────
-    N_SUBJECTS = _envi("N_SUBJECTS", 100),   # 사용 subject 수 (id 작은 것부터)
-    N_TRAIN    = _envi("N_TRAIN", 70),       # P7: was 80; free 10 for validation
-    N_VAL      = _envi("N_VAL", 10),         # P7: was 0 -> enables Step9/13 metrics + baseline
-    N_TEST     = _envi("N_TEST", 20),
+    N_SUBJECTS = _envi("N_SUBJECTS", 4 if SMOKE else 100),   # 사용 subject 수 (id 작은 것부터)
+    N_TRAIN    = _envi("N_TRAIN", 2 if SMOKE else 70),       # real: was 80; free 10 for validation
+    N_VAL      = _envi("N_VAL", 1 if SMOKE else 10),         # enables Step9/13 metrics + baseline
+    N_TEST     = _envi("N_TEST", 1 if SMOKE else 20),
     SEED       = 42,
 
     # ── Simulation ───────────────────────────────────────────
-    N_SIM      = _envi("N_SIM", 2_000),
-    GPU_BATCH  = _envi("GPU_BATCH", 2_000),
+    N_SIM      = _envi("N_SIM", 64 if SMOKE else 2_000),
+    GPU_BATCH  = _envi("GPU_BATCH", 64 if SMOKE else 2_000),
 
-    # ── Simulation time (ms) — HCP rfMRI TR=0.72s; 3min run, 1min cut ─
-    T_END_MS   = 180_000.0,          # 3 min
-    T_CUT_MS   =  60_000.0,          # cut first 1 min (transient) -> 120s / 167 TR
+    # ── Simulation time (ms) — HCP rfMRI TR=0.72s; 875 TR total, 1min cut ─
+    # Lengthened from 180s/166 TR toward HCP empirical FC length. T_END_MS MUST be a
+    # whole number of SECONDS: runner_rwweib_2cpl does T_END/1000 -> seconds and cuBNM
+    # rejects durations not expressible in whole ms (622.08s -> 622080.0000409 ms ->
+    # ALL sims fail). 630000 = 630.0s = 875 TR (multiple of both 1000ms and 720ms).
+    T_END_MS   = 630_000.0,          # 875 TR total (630.0 s ~ 10.5 min) — clean seconds
+    T_CUT_MS   =  60_000.0,          # cut first 1 min transient -> 791 TR analyzed
     DT         = 1.0,                # RWW Euler step (ms)
     DECIMATE   = 720,                # neural stored dt = DT*DECIMATE = 720ms
-    TR_SEC     = 0.72,               # BOLD sampling period (s) -> 333 TR analysis
+    TR_SEC     = 0.72,               # BOLD sampling period (s) -> 791 TR analysis
 
     # ── HRF ──────────────────────────────────────────────────
-    HRF_A1 = 3.0, HRF_A2 = 7.0, HRF_L = 1.0, HRF_C = 0.3,
+    # human HRF (was mouse A1=3/A2=7). Only used by hrf="vbi"; production = bw.
+    HRF_A1 = 6.0, HRF_A2 = 16.0, HRF_L = 1.0, HRF_C = 0.167,
     HRF_LENGTH_SEC = 32.0, HRF_LENGTH_MS = 20_000.0,
 
     # ── Embedding (RegionTransformer + raw-FC passthrough) ──
@@ -110,13 +125,13 @@ config.RWWEIB2_FIXED      = {"w_E": 1.0, "w_I": 0.7, "J_i": 1.0, "w_p": 1.4,
 # Metric/target levers (data analysis: per-subj raw-FC SC-corr ~0.05; cortical-
 # only + group-avg raises the achievable ceiling to ~0.2). Cortical-only is set
 # via N_REGIONS=360 above; group-avg FC target via the flag below.
-config.GROUP_AVG_FC       = (os.environ.get("GROUP_AVG_FC", "1") == "1")  # False -> per-subject FC
+config.GROUP_AVG_FC       = (os.environ.get("GROUP_AVG_FC", "0") == "1")  # default per-subject FC; GROUP_AVG_FC=1 -> group-avg
 # ── Region-wise latent inference (new mode; default OFF = homogeneous baseline) ──
 # PARAMETER_MODE: "homogeneous" (baseline) | "latent_regionwise".
 # In latent mode SNPE infers a low-dim latent z (BoxUniform[-1,1]^latent_dim);
 # param_decoder turns z into per-region maps for [g_LRE,g_FFI,I_o,sigma]; cuBNM
 # receives per-node matrices. See region_basis.py / param_decoder.py / PIPELINE.md.
-config.PARAMETER_MODE     = os.environ.get("PARAMETER_MODE", "homogeneous")
+config.PARAMETER_MODE     = os.environ.get("PARAMETER_MODE", "basis_regionwise")
 # 4 region-wise params (g_LRE promoted global->regional; requires cuBNM rebuilt
 # from the updated rww_eib_2cpl.yaml).
 config.HETERO_PARAMS      = ["g_LRE", "g_FFI", "I_o", "sigma"]
@@ -132,12 +147,32 @@ config.NETWORK_LABELS_CSV = None    # optional atlas network labels (row-aligned
 # myelin,gradient] (381,3). bounds below override HETERO_BOUNDS in that mode.
 config.BASIS_PATH         = os.environ.get("BASIS_PATH", "basis.npy")
 config.BASIS_REZSCORE     = True
-config.BASIS_BOUNDS       = {"g_LRE": (0.0, 3.0), "g_FFI": (0.0, 3.0),
-                             "I_o": (0.0, 1.0), "sigma": (0.0, 0.05)}
-config.BASIS_COEFF_PRIOR  = (-2.0, 2.0)
+# S5: coupling upper bound is env-tunable (G_BOUND_HIGH, default 3.0 = current).
+# Old wide-bound runs showed the posterior pushing g_LRE/g_FFI toward ~7, so the
+# (0,3) cap may under-couple and depress simFC structure. G_BOUND_HIGH=6 re-opens
+# it for ablation A4. tanh keeps maps within bounds so decode stays finite.
+_G_BOUND_HIGH = float(os.environ.get("G_BOUND_HIGH", "3.0"))
+# I_o operating-point bound. Old (0,1) put the decoder midpoint at I_o=0.5, but
+# the rWW-EI critical operating point (isolated node, no FIC) is I_o~0.382. With
+# (0,1) ~51% of prior-sampled (sim,region) entries land saturated and only ~3%
+# in the critical band, so SNPE trains mostly on degenerate/saturated FCs.
+# (0.30,0.45) centers the midpoint at 0.375 ~= critical -> the bulk of training
+# sims are non-saturated. Revert to old behavior with IO_BOUND_LO=0 IO_BOUND_HI=1.
+_IO_LO = float(os.environ.get("IO_BOUND_LO", "0.30"))
+_IO_HI = float(os.environ.get("IO_BOUND_HI", "0.45"))
+config.BASIS_BOUNDS       = {"g_LRE": (0.0, _G_BOUND_HIGH),
+                             "g_FFI": (0.0, _G_BOUND_HIGH),
+                             "I_o": (_IO_LO, _IO_HI), "sigma": (0.0, 0.05)}
+config.BASIS_COEFF_PRIOR  = (float(os.environ.get("COEFF_PRIOR_LO", "-10.0")),
+                             float(os.environ.get("COEFF_PRIOR_HI", "10.0")))
+# basis mode uses the narrow BASIS_BOUNDS, NOT the wide homogeneous HETERO_BOUNDS.
+# Apply it HERE, before the C1 banner builds/caches the decoder — otherwise the
+# decoder caches the wide (0-9) bounds and the later override is a no-op.
+if str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "basis_regionwise":
+    config.HETERO_BOUNDS = dict(config.BASIS_BOUNDS)
 # SC dataset: "hcp_v73" (HCP_SC.mat, h5py) | "cabnp381" (HCP_CABNP381_SC_first100.mat,
 # 3D weight_all/tract_length_all; FC still from HCP_FC.mat).
-config.SC_DATASET         = os.environ.get("SC_DATASET", "hcp_v73")
+config.SC_DATASET         = os.environ.get("SC_DATASET", "cabnp381")
 config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by final_test (uses Phase1) and hurt NLL (-6.12 vs -8.49) -> skip
 # ④ per-subject SC conditioning in the embedding (true amortization). Core is
 # implemented + CPU-verified in inference/embedding.py (per_subject_sc path) and
@@ -146,7 +181,34 @@ config.RUN_PHASE24        = False   # P6: Phase2/4 feature-selection unused by f
 config.EMBED_PER_SUBJECT_SC = False
 config.VELOCITY_M_PER_S   = 3.0                # human conduction velocity (m/s)
 config.USE_FCD            = False              # HCP FC only (no FCD)
-config.USE_DELAYS         = (os.environ.get("USE_DELAYS", "0") == "1")  # tract-length delays (~9x sim cost)
+# FC dimensionality reduction: PCA (whitened) replaces the removed RegionTransformer
+# embedding. FC rank <= N_REGIONS(360), so 256 comps capture nearly all structure;
+# keeps SNPE-C conditioning tractable (avoids the raw-64620 leakage / 0% accept).
+config.FC_PCA_DIM         = int(os.environ.get("FC_PCA_DIM", "256"))
+# S4: FC PCA whitening toggle (default 1 = current behavior). whiten amplifies
+# low-variance PCs and can push empirical FC OOD (rejection accept <1% in the
+# t20 run). FC_PCA_WHITEN=0 keeps natural scale -> obs projections stay in-range.
+config.FC_PCA_WHITEN      = (os.environ.get("FC_PCA_WHITEN", "1") == "1")
+config.USE_DELAYS         = (os.environ.get("USE_DELAYS", "0") == "1")  # default OFF: GPU sanity (delay_sanity_rwweib2.py) showed delays cost 5.3x for ~0 BOLD-FC change (6-100ms << 720ms TR/decimate); USE_DELAYS=1 to re-enable
+# ── SC-conditioned amortized NPE (matrix-encoder) — default OFF = FC-only baseline ──
+# SC_CONDITION on -> condition the posterior on a learned encoder over multi-channel
+# ROIxROI matrices [FC, <SC_CHANNELS>] via MultiChannelMatrixEmbedding (per-subject SC
+# looked up by index; theta stays 12 basis coeffs). OFF preserves the FC-only path.
+# SC_CHANNELS: subject-constant channels stacked per subject (delay excluded per the
+# sanity result; re-add "delay" here to include it). FC is always the per-sim channel.
+config.SC_CONDITION       = (os.environ.get("SC_CONDITION", "1") == "1")  # default ON (q(theta|SC,FC)); SC_CONDITION=0 to disable
+config.SC_CHANNELS        = tuple(
+    os.environ.get("SC_CHANNELS", "sc_weight,sc_mask").split(","))
+# ── Geometry coupling (homotopic SC augmentation) — default OFF = baseline ──
+# Empirical FC is dominated by homotopic (i,i+180) edges (0.40 vs 0.06 mean, 6.2x)
+# that tractography SC under-recovers, capping the SC-driven ceiling (~0.2). Adding
+# a homotopic prior to the coupling lets the simulator generate cross-hemisphere FC.
+# Structural prior only — theta_dim / model equations unchanged. Distance kernel is
+# intentionally absent (tract-length distance was non-informative for FC here).
+config.GEOMETRY_COUPLING  = (os.environ.get("GEOMETRY_COUPLING", "0") == "1")
+config.GEOM_ALPHA         = float(os.environ.get("GEOM_ALPHA", "0.3"))
+config.GEOM_KERNEL        = os.environ.get("GEOM_KERNEL", "homotopic")
+config.GEOM_RENORM        = (os.environ.get("GEOM_RENORM", "1") == "1")
 
 import data_loader_hcp as data_loader          # <-- HCP loader (drop-in)
 import evaluate
@@ -154,6 +216,43 @@ import inference
 import simulator
 
 config.print_config()
+
+# ── C1: explicit, fail-fast active-mode banner + basis-mode guard ─────────────
+# Without this, an unset PARAMETER_MODE env var silently selects the
+# "homogeneous" baseline and the myelin/gradient basis experiment is skipped.
+# Always print the active config; by default HARD-FAIL unless basis_regionwise
+# is selected. Opt out of the guard with REQUIRE_BASIS=0 to run another mode
+# (homogeneous/direct/latent) on purpose.
+_pm = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+try:
+    if _pm == "basis_regionwise":
+        from basis_decoder import get_decoder as _gd
+        _theta_dim = _gd(config).theta_dim
+    elif _pm == "direct_regionwise":
+        _theta_dim = len(config.HETERO_PARAMS) * int(config.N_REGIONS)
+    elif _pm == "homogeneous":
+        _theta_dim = len(config.STAGE1_PARAMS)
+    else:  # latent_regionwise: depends on the per-subject SC basis (set later)
+        _theta_dim = "set after Step 1 (SC-dependent)"
+except Exception as _e:  # never let the banner crash the run
+    _theta_dim = f"?? ({type(_e).__name__}: {_e})"
+print("=" * 70)
+print("  [HCP] ACTIVE INFERENCE CONFIG")
+print("=" * 70)
+print(f"    PARAMETER_MODE  : {_pm}")
+print(f"    INFERENCE_MODEL : {getattr(config, 'INFERENCE_MODEL', '?')}")
+print(f"    N_REGIONS       : {getattr(config, 'N_REGIONS', '?')}")
+print(f"    BASIS_PATH      : {getattr(config, 'BASIS_PATH', '?')}")
+print(f"    theta_dim       : {_theta_dim}")
+print("=" * 70)
+_REQUIRE_BASIS = (os.environ.get("REQUIRE_BASIS", "1") == "1")
+if _REQUIRE_BASIS and _pm != "basis_regionwise":
+    raise RuntimeError(
+        f"main_HCP expects the basis_regionwise (myelin/gradient) experiment "
+        f"but PARAMETER_MODE={_pm!r}. Run with "
+        f"PARAMETER_MODE=basis_regionwise (recommended), or set REQUIRE_BASIS=0 "
+        f"to explicitly opt into another mode (homogeneous/direct/latent)."
+    )
 
 
 # ## (Optional) 자원 진단 + 최적 GPU_BATCH 자동 탐색
@@ -377,6 +476,33 @@ subject_data = data_loader.load_all_subjects(
 # Result
 evaluate.report_step1(train, val, test, subject_data)
 
+# ── Step 1.5: SC-conditioned amortized NPE — per-subject SC table ────────────
+# Gated on config.SC_CONDITION (default OFF). When OFF this is a no-op
+# (SC_TABLE=None) so every downstream FC-only path is byte-for-byte identical.
+# When ON, build a per-subject multi-channel SC table over ALL subjects
+# (train+val+test) as a leakage-safe lookup buffer. The ScChannelScaler is FIT
+# ON TRAIN ROWS ONLY then applied to the whole table; val/test rows are never
+# referenced during training (only their own row is read at eval time), so this
+# is not leakage. config.SC_IDMAP maps {sid: row} for both training x and
+# eval x_obs.
+SC_TABLE = None
+if getattr(config, "SC_CONDITION", False):
+    from inference.sc_channels import build_sc_table, ScChannelScaler
+    _all = list(train) + list(val) + list(test)
+    _sctab_raw, _scidmap = build_sc_table(
+        subject_data, _all, config.SC_CHANNELS)
+    _trows = [_scidmap[int(s)] for s in train]
+    _scsc = ScChannelScaler().fit(_sctab_raw[_trows], config.SC_CHANNELS)
+    SC_TABLE = _scsc.transform(_sctab_raw)
+    config.SC_IDMAP = _scidmap
+    print("\n  ===== Step 1.5: SC_CONDITION = ON (SC-conditioned NPE) =====")
+    print(f"    SC table         : shape {SC_TABLE.shape}  "
+          f"(n_subj={SC_TABLE.shape[0]}, C={SC_TABLE.shape[1]}, "
+          f"N={SC_TABLE.shape[2]})")
+    print(f"    SC channels      : {list(config.SC_CHANNELS)}")
+    print(f"    scaler fit on    : {len(_trows)} TRAIN rows (val/test held out)")
+    print("  ============================================================")
+
 # ── Latent region-wise setup (PARAMETER_MODE='latent_regionwise') ────────────
 # Replace STAGE1_PARAMS with latent coefficient names and make the prior a
 # BoxUniform[-1,1]^latent_dim (scaler becomes identity). The decoder maps z to
@@ -449,6 +575,22 @@ elif str(getattr(config, "PARAMETER_MODE", "homogeneous")) == "basis_regionwise"
     print(f"    decoded map shape: (n_sims, {_dec.n_regions}) per param  "
           f"(mid+half*tanh(basis@beta))")
     print("  ============================================================")
+
+# ── per-subject myelin/gradient basis (BASIS_PERSUBJECT=1) ────────────────────
+# Each subject decodes with its OWN myelin/gradient (myelin/gradient_subjects.npy,
+# rows aligned to SC sub_num) instead of the shared group-mean basis.npy. theta
+# (coeffs) stays 12-dim; only the spatial template becomes per-subject. Default OFF.
+config.BASIS_PERSUBJECT = (os.environ.get("BASIS_PERSUBJECT", "0") == "1")
+if config.BASIS_PERSUBJECT and str(getattr(config, "PARAMETER_MODE", "")) == "basis_regionwise":
+    from basis_decoder import build_persubject_bases
+    _scf = getattr(config, "SC_PATH", None) or config.SC_FILE
+    config.PERSUBJECT_BASES = build_persubject_bases(_scf, n_regions=int(config.N_REGIONS))
+    _miss = [int(s) for s in subject_data if int(s) not in config.PERSUBJECT_BASES]
+    if _miss:
+        raise RuntimeError(f"BASIS_PERSUBJECT: no per-subject basis for {_miss[:5]} "
+                           f"(have {len(config.PERSUBJECT_BASES)}). Check row alignment.")
+    print(f"  [basis] PER-SUBJECT myelin/gradient ON: {len(config.PERSUBJECT_BASES)} subjects; "
+          f"each sim/eval decodes with its own subject's basis (rows ~ SC sub_num).")
 
 
 # ## Train data: weights / tract lengths / empirical FC
@@ -557,22 +699,76 @@ import json as _json
 
 def _cache_meta_now():
     """Cache-identity metadata. Mismatch => stale (never mix modes/targets)."""
+    from simulation.geometry import geometry_meta as _geom_meta
     _pm = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
     _rw = _pm in ("latent_regionwise", "direct_regionwise", "basis_regionwise")
     _basis = (config.BASIS_TYPE if _pm == "latent_regionwise"
               else (os.path.basename(config.BASIS_PATH)
                     if _pm == "basis_regionwise" else None))
     _nlap = int(config.N_LAPLACIAN_BASIS) if _pm == "latent_regionwise" else None
+    # S5 fix: bounds feed the decoder (map=mid+half*tanh(z)), so a bound change
+    # (e.g. G_BOUND_HIGH) changes theta_raw + decoded maps + the simulated FC in
+    # features_stage1.npz. It MUST be in the cache identity or an ablation would
+    # silently reuse stale (wrong-bound) sims. Same for USE_DELAYS (delays on/off
+    # change the simulated FC). Both are env-tunable free variables now.
+    _hb = {k: list(v) for k, v in
+           sorted((getattr(config, "HETERO_BOUNDS", {}) or {}).items())} if _rw else None
+    # --- extra cache-identity fields. Omitting any sim-determining variable lets a
+    # stale cache be silently reused after a sim-changing edit (e.g. an I_o-bound /
+    # sim-length / SC change) so the edit never reaches the trained posterior.
+    # See docs/performance_root_cause.md (cache-key-omits-* findings).
+    import hashlib as _hashlib
+    _basis_hash = None
+    if _pm == "basis_regionwise":
+        try:
+            _basis_hash = _hashlib.sha1(
+                np.load(config.BASIS_PATH).tobytes()).hexdigest()[:12]
+        except Exception:
+            _basis_hash = "??"
+    _rww_fixed = ({k: float(v) for k, v in
+                   sorted((getattr(config, "RWWEIB2_FIXED", {}) or {}).items())}
+                  if str(config.INFERENCE_MODEL).startswith("rwweib") else None)
+    try:                       # `train` is the script-global train split (defined in Step 1)
+        _train_ids = sorted(int(s) for s in train)
+    except Exception:
+        _train_ids = None
     return {
         "target_fc_mode": "group" if config.GROUP_AVG_FC else "subject",
         "PARAMETER_MODE": config.PARAMETER_MODE,
         "N_REGIONS": int(config.N_REGIONS),
         "FC_DIM": int(config.FC_DIM),
         "hetero_params": list(config.HETERO_PARAMS) if _rw else [],
+        "hetero_bounds": _hb,
+        "use_delays": bool(getattr(config, "USE_DELAYS", False)),
         "basis_type": _basis,
         "n_laplacian_basis": _nlap,
         "latent_dim": len(config.STAGE1_PARAMS) if _rw else None,
         "model": config.INFERENCE_MODEL,
+        # Operating-point / regime variables that change the simulated FC but were
+        # previously absent from the key (the I_o bound is already covered via
+        # hetero_bounds above; these are the remaining free variables).
+        "use_fic": bool(getattr(config, "USE_FIC", False)),
+        "sim_timing": [config.T_END, config.T_CUT, config.DT,
+                       int(config.DECIMATE), config.TR_SEC],
+        "sim_seed": int(getattr(config, "SIM_SEED", 42)),
+        "sc_dataset": getattr(config, "SC_DATASET", None),
+        "sc_file": os.path.basename(str(getattr(config, "SC_FILE", ""))),
+        "sc_scale": os.environ.get("VBI_SC_SCALE", "log1p"),
+        "rwweib2_fixed": _rww_fixed,
+        "basis_rezscore": bool(getattr(config, "BASIS_REZSCORE", False)),
+        "basis_persubject": bool(getattr(config, "BASIS_PERSUBJECT", False)),
+        "coeff_prior": list(getattr(config, "BASIS_COEFF_PRIOR", (-2.0, 2.0))),
+        "basis_hash": _basis_hash,
+        "train_ids": _train_ids,
+        # Geometry coupling changes the SC fed to the simulator -> changes the
+        # simulated FC, so it MUST be in the cache key (re-sim on a geometry change).
+        **_geom_meta(config),
+        # NOTE: sc_condition / sc_channels are deliberately NOT in the cache key.
+        # The Step-2 sim (theta -> FC) is identical regardless of conditioning;
+        # SC channels only enter Step 4 (x=[idx|fc]) and Step 8 (encoder), which
+        # are post-cache. Keeping them out lets the ablation arms (A FC-only /
+        # B,C,D SC variants) SHARE one simulation cache and only re-train the NPE.
+        # subj_ids is always saved (producer-side), so any arm can build x.
     }
 
 
@@ -620,6 +816,15 @@ if not _cache_ok:
     diag_bold    = _result.get("diag_bold")
     diag_sid     = _result.get("diag_sid")
 
+# subj_ids: per-simulation subject-id array aligned with fc_raw rows. Needed by
+# the SC_CONDITION x=[idx|fc] path to look up each sim's SC row. Pulled from the
+# cache when reused, else from the fresh simulation result.
+subj_ids = (_loaded.get("subj_ids") if _cache_ok else _result.get("subj_ids"))
+if getattr(config, "SC_CONDITION", False) and subj_ids is None:
+    raise RuntimeError(
+        "SC_CONDITION needs subj_ids; clear features_stage1.npz and "
+        "re-simulate")
+
 evaluate.report_step2(theta_scaled, fc_raw, fcd_raw)
 
 
@@ -661,6 +866,7 @@ if not _cache_ok:
         save_dir=config.OUTPUT_DIR,
         tag="stage1",
         verbose=True,
+        subj_ids=subj_ids,   # SC_CONDITION lookup keys (None in FC-only mode)
     )
     with open(_meta_path, "w") as _mf:        # cache-identity sidecar
         _json.dump(_cache_meta_now(), _mf, indent=2)
@@ -684,13 +890,63 @@ evaluate.report_step3(fc_raw, fcd_raw)
 # No PCA, no z-score — RegionTransformer handles feature extraction
 from inference.feature_pipeline import FeaturePipeline
 
-feature_pipeline = FeaturePipeline()
-# fit() returns self; fit_transform() returns the (n_train, fc_dim) array
-x_input = feature_pipeline.fit_transform(fc_raw, fcd_raw, verbose=True)
+# S3: drop degenerate sims (NaN / saturated / out-of-range / dead-flat FC) BEFORE
+# fitting the PCA so they don't pollute the FC basis. theta_scaled/fc_raw/fcd_raw
+# are row-aligned, so the SAME mask is applied to all three (keeps SNPE pairs
+# matched). Mirrors the filter in inference.step5_fit_feature_pipeline; the
+# main_HCP Step 4 path previously skipped it.
+_n0 = fc_raw.shape[0]
+_finite = np.isfinite(fc_raw).all(axis=1)
+_notsat = fc_raw.std(axis=1) > 1e-4
+_inrng  = (fc_raw.min(axis=1) >= -1.001) & (fc_raw.max(axis=1) <= 1.001)
+_alive  = np.abs(fc_raw).mean(axis=1) > 1e-3
+_qmask  = _finite & _notsat & _inrng & _alive
+_n1 = int(_qmask.sum())
+print(f"  [Step 4] sim-quality filter: {_n0:,} -> {_n1:,}  "
+      f"(NaN={int((~_finite).sum())}, sat={int((~_notsat).sum())}, "
+      f"oor={int((~_inrng).sum())}, dead={int((~_alive).sum())})")
+# Relative floor: fail only if the filter dropped most sims (mass degeneration)
+# or kept too few for SNPE. An absolute 1000 floor wrongly broke SMOKE runs
+# (N_TRAIN=2 x N_SIM=64 = 128 valid sims). max(16, 50% of n0) scales with run size.
+_min_keep = max(16, int(0.5 * _n0))
+if _n1 < _min_keep:
+    raise RuntimeError(
+        f"유효 시뮬 {_n1} < {_min_keep} (={_n0}개 중 절반 미만 또는 <16) "
+        "— prior/시뮬/bounds 확인 필요 (degenerate FC가 너무 많음).")
+if _n1 < _n0:
+    theta_scaled = theta_scaled[_qmask]
+    theta_raw    = theta_raw[_qmask]
+    fc_raw       = fc_raw[_qmask]
+    fcd_raw      = fcd_raw[_qmask]
+    # SC_CONDITION: subj_ids is row-aligned with fc_raw, so the SAME mask must
+    # filter it (keeps each x's index column matched to its FC row).
+    if getattr(config, "SC_CONDITION", False) and subj_ids is not None:
+        subj_ids = subj_ids[_qmask]
 
-print(f"  [Step 4] x_input shape : {x_input.shape}")
-print(f"  [Step 4] FC raw passthrough — no PCA, no z-score")
-print(f"  [Step 4] RegionTransformer will compress during SNPE-C training")
+if getattr(config, "SC_CONDITION", False):
+    # x = [row_index | fc_upper_tri]: the MultiChannelMatrixEmbedding compresses
+    # the raw FC, so NO FC PCA. idx_col references each sim's SC table row; the
+    # encoder looks up the subject-constant SC channels by that index.
+    idx_col = np.array(
+        [config.SC_IDMAP[int(s)] for s in subj_ids], dtype=np.float32)[:, None]
+    x_input = np.concatenate([idx_col, fc_raw.astype(np.float32)], axis=1)
+    # FeaturePipeline kept for compat (artifacts / eval transform_observed
+    # fallback) but NOT used to build x in SC mode.
+    feature_pipeline = FeaturePipeline()
+    feature_pipeline.fit(fc_raw, fcd_raw, verbose=False)
+    print(f"  [Step 4][SC] x=[idx|fc]  x_input shape : {x_input.shape}  "
+          f"(theta_scaled {theta_scaled.shape})")
+    print(f"  [Step 4][SC] leading col = SC table row index; "
+          f"FC upper-tri ({config.FC_DIM}) compressed by encoder (no PCA)")
+else:
+    feature_pipeline = FeaturePipeline()
+    # fit() returns self; fit_transform() returns the (n_kept, fc_out_dim) array
+    x_input = feature_pipeline.fit_transform(fc_raw, fcd_raw, verbose=True)
+
+    print(f"  [Step 4] x_input shape : {x_input.shape}  (theta_scaled {theta_scaled.shape})")
+    print(f"  [Step 4] FC PCA reduction -> {config.FC_PCA_DIM} comps "
+          f"(whiten={config.FC_PCA_WHITEN}), no embedding")
+    print(f"  [Step 4] x_input = PCA(FC) fed directly to MAF (no RegionTransformer)")
 
 
 # ## Step 8. Stage 1 inference (single-round SNPE-C)
@@ -698,13 +954,35 @@ print(f"  [Step 4] RegionTransformer will compress during SNPE-C training")
 # In[10]:
 
 
-posterior, embedding_net = inference.step8_train_snpe(
-    theta_scaled, x_input, prior_scaled,
-    verbose=True,
-    fc_raw=fc_raw,
-    use_embedding=True,
-    sc_matrix=subject_data[train[0]]["sc"],
-)
+# RegionTransformer embedding REMOVED — raw FC fed straight to MAF (no learned
+# embedding, no SC positional encoding). use_embedding=False -> nn.Identity in
+# train_snpe. (sc_matrix only fed the old embedding; dropped.)
+# SC_CONDITION ON -> swap in a MultiChannelMatrixEmbedding over [FC, SC channels]
+# (per-subject SC looked up by the leading idx column of x_input); FC-only path
+# is unchanged.
+if getattr(config, "SC_CONDITION", False):
+    from inference.embedding import MultiChannelMatrixEmbedding
+    _emb = MultiChannelMatrixEmbedding(
+        fc_input_dim=config.FC_DIM, sc_table=SC_TABLE,
+        out_dim=config.EMBED_DIM, n_regions=config.N_REGIONS,
+        use_fc_mask=True,
+    )
+    _USE_EMBEDDING = True
+    posterior, embedding_net = inference.step8_train_snpe(
+        theta_scaled, x_input, prior_scaled,
+        verbose=True,
+        fc_raw=fc_raw,
+        use_embedding=True,
+        embedding_net=_emb,
+    )
+else:
+    _USE_EMBEDDING = False
+    posterior, embedding_net = inference.step8_train_snpe(
+        theta_scaled, x_input, prior_scaled,
+        verbose=True,
+        fc_raw=fc_raw,
+        use_embedding=_USE_EMBEDDING,
+    )
 
 s1 = {
     "posterior":        posterior,
@@ -719,6 +997,7 @@ s1 = {
     "prior_scaled":     prior_scaled,
     "pca_diagnostic":   None,
 }
+s1["sc_idmap"] = getattr(config, "SC_IDMAP", None)
 
 # Result
 evaluate.report_step8(posterior, embedding_net, theta_scaled, x_input)
@@ -824,19 +1103,35 @@ fc_vec_0  = fc_to_upper_tri(fc_obs_0)
 if config.SBI_DEVICE == "cuda":
     torch.cuda.empty_cache()
 with torch.no_grad():
+    # x_obs MUST match the training conditioning. SC_CONDITION ON -> x=[idx|fc]
+    # via build_x_obs (encoder input, dim 1+FC_DIM); OFF -> the FeaturePipeline
+    # transform (PCA/whiten) exactly as before (baseline byte-identical).
+    if getattr(config, "SC_CONDITION", False):
+        from inference.posterior import build_x_obs as _build_x_obs
+        _x1 = np.asarray(_build_x_obs(
+            feature_pipeline, fc_vec_0, None,
+            sid=train[0], fc_matrix=fc_obs_0), dtype=np.float32)
+    else:
+        _x1 = np.asarray(feature_pipeline.transform(
+            fc_vec_0[None, :].astype(np.float32), np.zeros((1, 0), np.float32)),
+            dtype=np.float32)
     samples_1 = posterior.sample(
         (n_samples,),
-        x=torch.tensor(fc_vec_0, dtype=torch.float32
-            ).unsqueeze(0).to(config.SBI_DEVICE),
+        x=torch.tensor(_x1).to(config.SBI_DEVICE),
         show_progress_bars=False,
         reject_outside_prior=False,
     ).detach().cpu().numpy()
 
     fc_vec_k  = fc_vec_0[fc_selected_indices]
+    # Phase24 OFF: posterior_2 aliases Phase1 (full-FC PCA pipeline) -> reuse _x1.
+    # Phase24 ON: posterior_2 trained on selected RAW edges -> pass them raw.
+    if getattr(config, "RUN_PHASE24", False):
+        _x2 = torch.tensor(fc_vec_k, dtype=torch.float32).unsqueeze(0).to(config.SBI_DEVICE)
+    else:
+        _x2 = torch.tensor(_x1).to(config.SBI_DEVICE)
     samples_2 = posterior_2.sample(
         (n_samples,),
-        x=torch.tensor(fc_vec_k, dtype=torch.float32
-            ).unsqueeze(0).to(config.SBI_DEVICE),
+        x=_x2,
         show_progress_bars=False,
         reject_outside_prior=False,
     ).detach().cpu().numpy()
@@ -909,7 +1204,9 @@ baseline_agg = evaluate.baseline_eval_subjects(
 # computed (used for aggregate diagnostics) but the per-param histogram is skipped.
 _BIG_P = len(config.STAGE1_PARAMS) > 30
 
-if not _BIG_P:
+if not _USE_EMBEDDING:
+    print("  [probing] skipped (no embedding — raw FC -> MAF; embedding probe N/A)")
+elif not _BIG_P:
     inference.evaluate_embedding_probing(
         s1["embedding_net"], s1["theta_scaled"],
         s1["x_input"], config.STAGE1_PARAMS, verbose=True,
@@ -923,20 +1220,29 @@ try:
     from active_sensitivity import report_active_sensitivity
     report_active_sensitivity(
         s1["posterior"], s1["theta_scaled"], config.STAGE1_PARAMS,
-        x_obs=fc_vec_0,
+        x_obs=_x1,   # PCA-reduced obs (matches training conditioning dim)
         num_monte_carlo_samples=1000, verbose=True,
     )
 except Exception as _e:
     print(f"  [ActiveSubspace] skipped: {type(_e).__name__}: {_e}")
 
-sbc_ranks = inference.simulation_based_calibration(
-    s1["posterior"], s1["prior_scaled"], s1["param_scaler"],
-    s1["feature_pipeline"], config.STAGE1_PARAMS,
-    weights=subject_data[train[0]]["sc"],
-    delays=subject_data[train[0]]["delays"],
-    n_sbc=config.N_SBC, n_posterior=1000,
-)
-if not _BIG_P:
+# SBC simulates from the prior and builds x via the FeaturePipeline internally,
+# which is not SC-aware (it can't prepend the [idx|fc] column). Skip in
+# SC_CONDITION mode — SBC is a calibration diagnostic and does NOT affect the
+# posterior-predictive FC corr (the core metric).
+if getattr(config, "SC_CONDITION", False):
+    print("  [SBC] skipped (SC_CONDITION: SBC needs SC-aware x=[idx|fc]; "
+          "diagnostic only, posterior-predictive eval unaffected)")
+    sbc_ranks = None
+else:
+    sbc_ranks = inference.simulation_based_calibration(
+        s1["posterior"], s1["prior_scaled"], s1["param_scaler"],
+        s1["feature_pipeline"], config.STAGE1_PARAMS,
+        weights=subject_data[train[0]]["sc"],
+        delays=subject_data[train[0]]["delays"],
+        n_sbc=config.N_SBC, n_posterior=1000,
+    )
+if sbc_ranks is not None and not _BIG_P:
     evaluate.plot_sbc_rank_histogram(sbc_ranks, config.STAGE1_PARAMS)
     evaluate.plot_posteriors(
         stage1_agg["per_subject"],
@@ -945,7 +1251,7 @@ if not _BIG_P:
         config.STAGE1_PRIOR_HIGH,
         title="Stage 1",
     )
-else:
+elif sbc_ranks is not None:
     import numpy as _np
     _sbc = _np.asarray(sbc_ranks)
     print(f"  [SBC] {_sbc.shape[0]} sims x {_sbc.shape[1]} params ranked "
@@ -1008,11 +1314,17 @@ test_summary = evaluate.final_test(
     test, subject_data, best_stage, s1, None,
     n_resim=config.N_TEST_RESIM, apply_bw=True, verbose=True,
 )
-evaluate.plot_fc_comparison(
-    test_summary["per_subject"],
-    save_path=os.path.join(config.OUTPUT_DIR, "test_fc_comparison.png"),
-    title=f"Test FC (Stage {best_stage})",
-)
+# split into images of 2 subjects each (test_fc_comparison_1.png, _2.png, ...)
+_per = test_summary["per_subject"]
+_grp = 2
+_nimg = (len(_per) + _grp - 1) // _grp
+for _i in range(0, len(_per), _grp):
+    _k = _i // _grp + 1
+    evaluate.plot_fc_comparison(
+        _per[_i:_i + _grp],
+        save_path=os.path.join(config.OUTPUT_DIR, f"test_fc_comparison_{_k}.png"),
+        title=f"Test FC (Stage {best_stage}) — {_k}/{_nimg}",
+    )
 
 # Result
 evaluate.report_step14(test_summary)
@@ -1031,6 +1343,85 @@ if (str(getattr(config, "PARAMETER_MODE", "homogeneous"))
         out_path=os.path.join(config.OUTPUT_DIR, "param_maps.npz"),
         n_post=getattr(config, "N_POSTERIOR", 1000), verbose=True,
     )
+
+
+# ── Stage 6: SC-conditioned diagnostics (gated; never blocks the summary) ─────
+# Decisive tests for whether SC-conditioning is REAL (not memorized/ignored) and
+# whether the posterior beats the prior. Only meaningful in SC_CONDITION mode.
+#   - boundary mass : posterior mass at the prior box edge (clip-fallback collapse)
+#   - OOD distance  : how far the empirical FC sits from the simulated-FC train cloud
+#   - median corr   : median-FC analogue of expected-FC
+#   - prior-predictive: theta~prior resim corr  -> posterior must beat it (delta>0)
+#   - SC-permutation : condition each test subject on a WRONG subject's SC; if corr
+#                      does NOT drop vs correct-SC, the encoder ignores/memorizes SC.
+if getattr(config, "SC_CONDITION", False) and os.environ.get("RUN_SC_DIAG", "1") == "1":
+    try:
+        from evaluation import sc_diagnostics as _scd
+        from evaluation.metrics import _resimulate_and_score, fc_metrics
+        from inference.posterior import infer_subject_raw as _infer
+        from features.fc import fc_to_upper_tri as _f2u
+        import numpy as _np
+
+        def _exp_corr(_preds, _fcobs, _nan):
+            if not _preds:
+                return 0.0
+            return fc_metrics(_fcobs, _np.mean(_np.stack(_preds, 0), 0),
+                              nan_mask=_nan)["corr"]
+
+        _n_d = int(getattr(config, "N_TEST_RESIM", 10))
+        _fc_mean, _fc_std = _scd.fit_train_fc_stats(_np.asarray(fc_raw))
+        _perm = _scd.permutation_index_map(config.SC_IDMAP)
+        # prior-predictive theta (shared across test subjects)
+        _th_pp_s = prior_scaled.sample((_n_d,)).cpu().numpy().astype(_np.float32)
+        _th_pp_r = param_scaler.inverse_transform(_th_pp_s)
+
+        print("\n" + "=" * 70)
+        print("  Stage 6: SC-conditioned diagnostics (test subjects)")
+        print("=" * 70)
+        _rows = []
+        for _r in test_summary["per_subject"]:
+            _sid = _r["sid"]; _d = subject_data[_sid]
+            _corr_post = float(_r.get("fc_corr_expected", 0.0))
+            _bm = _scd.boundary_mass(_r["samples_scaled"])
+            _med = _scd.median_fc_corr(_r["fc_preds"], _r["fc_obs"], _d.get("fc_nan"))["corr"]
+            _ood = _scd.ood_distance(_f2u(_d["fc"]), _fc_mean, _fc_std)
+            # prior-predictive on this subject's SC
+            _, _, _, _pp_preds = _resimulate_and_score(
+                _n_d, _th_pp_r, list(config.STAGE1_PARAMS), None,
+                _d["sc"], _d["delays"], _d["fc"], None, True,
+                sid=f"prior:{_sid}", verbose=False, fc_nan=_d.get("fc_nan"))
+            _corr_prior = _exp_corr(_pp_preds, _d["fc"], _d.get("fc_nan"))
+            # SC-permutation: condition on WRONG subject's SC, resim with OWN SC
+            _fcv = _f2u(_d["fc"]).astype(_np.float32)
+            _xp = _np.concatenate(
+                [_np.array([[float(_perm[int(_sid)])]], _np.float32),
+                 _fcv[None, :]], axis=1)
+            _sp, _, _, _ = _infer(posterior, _xp, param_scaler,
+                                  n_samples=_n_d, verbose=False)
+            _, _, _, _perm_preds = _resimulate_and_score(
+                _n_d, _sp, list(config.STAGE1_PARAMS), None,
+                _d["sc"], _d["delays"], _d["fc"], None, True,
+                sid=f"perm:{_sid}", verbose=False, fc_nan=_d.get("fc_nan"))
+            _corr_perm = _exp_corr(_perm_preds, _d["fc"], _d.get("fc_nan"))
+            _rows.append((_sid, _corr_post, _corr_prior, _corr_perm, _bm,
+                          _ood["z_rms"], _med))
+            print(f"  {_sid}: corr_post={_corr_post:+.4f} prior={_corr_prior:+.4f} "
+                  f"perm={_corr_perm:+.4f}  d(post-prior)={_corr_post-_corr_prior:+.4f} "
+                  f"d(post-perm)={_corr_post-_corr_perm:+.4f}  bndry={_bm:.3f} "
+                  f"ood_z={_ood['z_rms']:.2f} med={_med:+.4f}")
+        if _rows:
+            _a = _np.asarray([(r[1], r[2], r[3], r[4], r[5]) for r in _rows])
+            print("-" * 70)
+            print(f"  MEAN: post={_a[:,0].mean():+.4f} prior={_a[:,1].mean():+.4f} "
+                  f"perm={_a[:,2].mean():+.4f}  delta(post-prior)={(_a[:,0]-_a[:,1]).mean():+.4f} "
+                  f"delta(post-perm)={(_a[:,0]-_a[:,2]).mean():+.4f}")
+            print(f"  interp: delta(post-prior)>0 => posterior beats prior; "
+                  f"delta(post-perm)>0 => SC channel USED (not ignored/memorized).")
+            print(f"  boundary mass mean={_a[:,3].mean():.3f} (high+low shrink=clip collapse); "
+                  f"OOD z_rms mean={_a[:,4].mean():.2f}")
+        print("=" * 70)
+    except Exception as _e:
+        print(f"  [Stage 6 diagnostics] skipped: {type(_e).__name__}: {_e}")
 
 
 # ## Save outputs and summary

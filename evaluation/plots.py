@@ -217,21 +217,38 @@ def plot_one_simulation(sid, subject_data, theta_raw=None, param_names=None,
     d = subject_data[sid]
 
     if bold is None:
-        from engine_select import get_simulate_single  # honor INFERENCE_MODEL
-        simulate_single = get_simulate_single()
         if theta_raw is None or param_names is None:
             raise ValueError(
                 "plot_one_simulation: when bold is None, theta_raw and "
                 "param_names are required for re-simulation."
             )
-        params = {n: float(theta_raw[sim_idx, i])
-                  for i, n in enumerate(param_names)}
-        print(f"  [one-sim plot] sid={sid}  sim_idx={sim_idx}")
-        print(f"    params = {params}")
-        bolds = simulate_single(
-            d["sc"], params, n_repeat=1,
-            delays=d["delays"], apply_bw=True,
-        )
+        from engine_select import is_regionwise
+        if is_regionwise():
+            # M1 fix: region-wise theta are coefficients/latents -> decode via
+            # the wrapped batch simulator (same path as resim/baseline). Passing
+            # them as scalar params would be silently ignored by the simulator.
+            from engine_select import get_simulate_gpu_batch
+            simulate_gpu_batch = get_simulate_gpu_batch()
+            theta_b = np.asarray(
+                theta_raw[sim_idx:sim_idx + 1], dtype=np.float32)
+            params = {"(region-wise)": f"{len(param_names)}-dim theta -> maps"}
+            print(f"  [one-sim plot] sid={sid}  sim_idx={sim_idx}  "
+                  f"(region-wise: theta decoded to per-region maps)")
+            bolds = simulate_gpu_batch(
+                d["sc"], theta_b, list(param_names),
+                delays=d["delays"], apply_bw=True, subject_id=sid,
+            )
+        else:
+            from engine_select import get_simulate_single  # honor INFERENCE_MODEL
+            simulate_single = get_simulate_single()
+            params = {n: float(theta_raw[sim_idx, i])
+                      for i, n in enumerate(param_names)}
+            print(f"  [one-sim plot] sid={sid}  sim_idx={sim_idx}")
+            print(f"    params = {params}")
+            bolds = simulate_single(
+                d["sc"], params, n_repeat=1,
+                delays=d["delays"], apply_bw=True,
+            )
         bold = bolds[0]
     else:
         bold = np.asarray(bold)

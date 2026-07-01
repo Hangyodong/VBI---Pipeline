@@ -1,5 +1,8 @@
 # 03 — FC 미스펙 진단 (민감도 · 천장)
 
+> ⚠️ **LEGACY (mouse WC).** 현 HCP 진단은 `docs/performance_diagnosis.md` +
+> `docs/corr_improvement_plan.md` 참조.
+
 핵심 질문: **WC 시뮬이 실제 ctr+MPTP FC를 재현할 능력이 있나?** 원인이 (1)파라미터 선택 vs (2)시뮬 구조 미스펙인지 가른다.
 
 ## 배경 문제

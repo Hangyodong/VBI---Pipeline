@@ -72,6 +72,21 @@ def _regionwise_modes():
     return ("latent_regionwise", "direct_regionwise", "basis_regionwise")
 
 
+def is_regionwise():
+    """True when config.PARAMETER_MODE infers a region-wise control vector
+    (latent/direct/basis) whose theta MUST be decoded into per-region parameter
+    maps before simulation.
+
+    Single-simulation evaluation paths use this to route through the decoded
+    (latent_wrap-wrapped) batch simulator instead of passing coefficient-named
+    thetas (e.g. ``g_LRE_const``) as scalar params — which the simulator
+    silently ignores, falling back to defaults and giving identical, misleading
+    FC every draw.
+    """
+    return (str(getattr(config, "PARAMETER_MODE", "homogeneous"))
+            in _regionwise_modes())
+
+
 def latent_wrap(base_sim):
     """Wrap a base simulate_gpu_batch so the region-wise control vector (theta) is
     decoded to per-region parameter maps before simulation.
@@ -85,14 +100,47 @@ def latent_wrap(base_sim):
     from param_decoder import decode_to_param_maps, make_fixed_overrides_from_param_maps
 
     def wrapped(weights, theta, param_names=None, fixed_overrides=None,
-                delays=None, apply_bw=True, label=None, n_total=None, **kw):
+                delays=None, apply_bw=True, label=None, n_total=None,
+                subject_id=None, **kw):
         n_regions = np.asarray(weights).shape[0]
         mode = str(getattr(config, "PARAMETER_MODE", "homogeneous"))
-        basis = None
-        if mode == "latent_regionwise":
-            from region_basis import build_region_basis
-            basis = build_region_basis(weights, labels=load_network_labels(), config=config)
-        maps = decode_to_param_maps(theta, basis, config, n_regions=n_regions)
+        if mode == "basis_regionwise" and getattr(config, "BASIS_PERSUBJECT", False):
+            # per-subject myelin/gradient basis: decode THIS subject's basis.
+            import re as _re
+            from basis_decoder import get_decoder_for_basis
+
+            def _to_sid(c):
+                # robust: int, "100206", "resim(100206)", "baseline:100206" -> 100206
+                if c is None:
+                    return None
+                if isinstance(c, (int, np.integer)):
+                    return int(c)
+                m = _re.search(r"\d+", str(c))
+                return int(m.group()) if m else None
+            sid = _to_sid(subject_id)
+            if sid is None:
+                sid = _to_sid(label)
+            bases = getattr(config, "PERSUBJECT_BASES", None) or {}
+            if sid is not None and sid in bases:
+                dec = get_decoder_for_basis(
+                    bases[int(sid)], list(config.HETERO_PARAMS),
+                    getattr(config, "HETERO_BOUNDS", None),
+                    rezscore=bool(getattr(config, "BASIS_REZSCORE", True)))
+                maps = dec.decode(theta)
+            else:
+                # SBC / non-subject sims have no sid -> shared group basis (warn once).
+                if not getattr(config, "_PERSUBJ_FALLBACK_WARNED", False):
+                    print("  [basis] WARN: BASIS_PERSUBJECT on but subject_id unresolved "
+                          f"(subject_id={subject_id!r} label={label!r}) -> shared-basis "
+                          "fallback (expected only for SBC / non-subject sims).")
+                    config._PERSUBJ_FALLBACK_WARNED = True
+                maps = decode_to_param_maps(theta, None, config, n_regions=n_regions)
+        else:
+            basis = None
+            if mode == "latent_regionwise":
+                from region_basis import build_region_basis
+                basis = build_region_basis(weights, labels=load_network_labels(), config=config)
+            maps = decode_to_param_maps(theta, basis, config, n_regions=n_regions)
         ov = dict(fixed_overrides or {})
         ov.update(make_fixed_overrides_from_param_maps(maps))
         n = np.asarray(theta).shape[0]

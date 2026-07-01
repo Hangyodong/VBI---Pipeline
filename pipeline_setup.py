@@ -327,12 +327,21 @@ def setup_pipeline(cfg: PipelineConfig = None, *,
     if force_flush:
         _patch_print_flush()
 
+    # S6: reproducibility. Seed CUDA RNG too (SNPE init + posterior sampling run
+    # on GPU). DETERMINISTIC=1 additionally forces cudnn deterministic algorithms
+    # for bit-reproducible posteriors (slightly slower; honored by inference/snpe).
+    config.DETERMINISTIC = (os.environ.get("DETERMINISTIC", "0") == "1")
     if seed:
         import numpy as np
         np.random.seed(config.SEED)
         try:
             import torch
             torch.manual_seed(config.SEED)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(config.SEED)
+            if config.DETERMINISTIC:
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
         except ImportError:
             pass
 

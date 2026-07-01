@@ -3,11 +3,42 @@
 Whole-brain parameter inference with simulation-based inference (SNPE-C).
 GPU forward simulation via **cuBNM**, amortized posterior via **sbi**.
 
+Infers region-wise RWW-EIB parameters — encoded as **myelin/gradient basis
+coefficients** — from HCP functional connectivity (FC).
+
 Two entrypoints:
 - **`main_HCP.py`** — HCP human, **RWWEIB_2CPL** model, 360 cortical regions. (canonical / active)
 - **`main.py`** — mouse MPTP, Wilson-Cowan model, 115 regions. (legacy)
 
-> Detailed, per-stage documentation: **[`PIPELINE.md`](PIPELINE.md)**.
+> **Source of truth = code + config.** Detailed, verified pipeline docs:
+> [`CLAUDE.md`](CLAUDE.md) + [`docs/current_pipeline.md`](docs/current_pipeline.md).
+
+---
+
+## Data
+
+The active pipeline reads FC + SC + myelin/gradient maps. Large `.mat` files
+exceed GitHub's 100MB limit and are **not** committed — obtain them separately
+and place them in the repo root.
+
+### In-repo (committed)
+| File | Size | Contents |
+|------|------|----------|
+| `HCP_CABNP381_SC_first100.mat` | 43M | **active SC** — CAB-NP 381-region, first 100 subjects (`SC_DATASET=cabnp381`) |
+| `myelin_subjects.npy` | 300K | per-subject myelin (T1w/T2w) maps — basis input |
+| `gradient_subjects.npy` | 300K | per-subject principal functional-gradient maps — basis input |
+| `basis.npy` | 9K | `(381,3) = [const, myelin, gradient]` basis matrix (sliced `[:360]`) |
+| `Custom_Schaefer200_7net_PD25subcortex*.txt` | 6.5K | parcellation label tables |
+
+### External (NOT committed — get separately)
+| File | Size | Contents |
+|------|------|----------|
+| `HCP_FC.mat` (var `C`) | 1.1G | **active FC** target — per-subject 381-region FC |
+| `HCP_SC.mat` | 224M | full HCP SC (alternate `SC_DATASET`) |
+| `MPTP_FC_115.mat` / `MPTP_SC_115.mat` | | legacy mouse data |
+
+Cortical-only: 381 → first **360** Glasser regions (21 subcortical dropped).
+SC scaling via `VBI_SC_SCALE` (`main_HCP.py` forces `maxnorm`).
 
 ---
 
@@ -25,46 +56,47 @@ dS_I/dt = −S_I/τ_I +          γ_I·H_I(I_I) + σ·ξ
 ```
 BOLD = Balloon-Windkessel HRF on `S_E`.
 
-### Inferred parameters (Stage 1)
-| param | role | prior (3× original) |
-|-------|------|------|
-| `g_LRE` | excitatory long-range coupling | U(0, 9) |
-| `g_FFI` | inhibitory long-range coupling | U(0, 9) |
-| `I_o`   | background input current       | U(0.15, 0.60) |
-| `sigma` | noise amplitude                | U(0, 0.09) |
+### Parameterization — `basis_regionwise` (default)
+Four region-wise params (`g_LRE, g_FFI, I_o, sigma`) are **not** inferred
+directly. Instead each is a linear combination of 3 basis maps
+`[const, myelin, gradient]`, so the inferred vector `theta` has **12 = 4×3**
+coefficients (`theta_dim=12`).
 
-Fixed: `w_E=1.0, w_I=0.7, J_i=1.0, w_p=1.4, J_N=0.15, λ_IE=1.0`.
-Parameters are **homogeneous** (shared across nodes per simulation).
+Decode (`basis_decoder.py`): per param,
+```
+z   = beta · basis.Tᵀ          # (S,360) region map from 3 coeffs
+map = mid + half·tanh(z)        # mid=(lo+hi)/2, half=(hi-lo)/2
+```
+Basis bounds (`BASIS_BOUNDS`): `g_LRE(0,3) g_FFI(0,3) I_o(...) sigma(0,0.05)`.
+Prior: scaled `BoxUniform[-1,1]^12`; raw coeff `(-2,2)`. `theta=0` → param
+midpoints. Bounds/coeff-order are load-bearing — see `CLAUDE.md`.
 
-### Data
-- `HCP_FC.mat` / `HCP_SC.mat` — 1039/1040 subjects, 381 regions.
-- **cortical-only**: first 360 (Glasser) regions; 21 subcortical dropped.
-- **group-averaged FC** target (`GROUP_AVG_FC=True`): mean FC over 1039 subjects.
-- SC scaling via `VBI_SC_SCALE` (`maxnorm` default).
+### Dataflow (one line)
+```
+theta(12) → decode → {g_LRE,g_FFI,I_o,sigma}(S,360) → RWWEIB_2CPLSimGroup(GPU)
+  → BOLD(T,360) → compute_fc (raw Pearson r) → upper-tri (64,620)
+  → FeaturePipeline PCA-256 whitened → SNPE-C (MAF, nn.Identity embedding)
+```
+N_SIM is **per-subject** → real train tensor = N_TRAIN × N_SIM.
 
-### Stages
-| Step | Description |
-|------|-------------|
-| 1  | Data split + load (train/val/test) |
-| 7  | Param scaler + BoxUniform prior (before Step 2) |
-| 2  | Forward simulation → BOLD → FC (training data); streamed feature extraction |
-| 3  | Feature summary + save (`features_stage1.npz`, with staleness guard) |
-| 4  | Feature pipeline (raw FC passthrough — no PCA / z-score) |
-| 8  | SNPE-C training (RegionTransformer embedding → posterior) |
-| 3/4* | Phase 3/4 feature-selection — **skipped** (`RUN_PHASE24=False`) |
-| 9  | Validation: resim, FC corr/RMSE, shrinkage, probing, ActiveSubspace, SBC |
-| 13 | Model selection |
-| 14 | Final test (bootstrap CI) |
+### ⚠️ Default gotchas (env overrides in `main_HCP.py`)
+- `SMOKE=1` is the **default** → bare `python main_HCP.py` is a **tiny toy**
+  (4/2/1/1 subjects, 64 sims). Real run = **`SMOKE=0`** (100/70/10/20, 2000 sims).
+- `GROUP_AVG_FC=0` → **per-subject** FC (not group-averaged).
+- `USE_DELAYS=0` → delays OFF (computed but not fed; ~0 BOLD-FC effect for 5.3× cost).
+- `SC_CONDITION=0`, `GEOMETRY_COUPLING=0` → baseline (both OFF).
 
 ### Run
 ```bash
-# smoke
-rm -f output_hcp/features_stage1.npz
-N_SUBJECTS=8 N_TRAIN=4 N_VAL=2 N_TEST=2 N_SIM=50 python main_HCP.py
-# full
-python main_HCP.py
+# REAL run (GPU node):
+SMOKE=0 PARAMETER_MODE=basis_regionwise python main_HCP.py
+
+# smoke / CPU-safe checks (no training):
+PARAMETER_MODE=basis_regionwise INFERENCE_MODEL=rwweib2 \
+  python -m pytest test_basis_mode_smoke.py -q
 ```
-Env overrides: `N_SUBJECTS, N_TRAIN, N_VAL, N_TEST, N_SIM, GPU_BATCH, VBI_SC_SCALE`.
+Env overrides: `SMOKE, N_SUBJECTS, N_TRAIN, N_VAL, N_TEST, N_SIM, GPU_BATCH,
+PARAMETER_MODE, SC_DATASET, SC_FILE, GROUP_AVG_FC, USE_DELAYS, VBI_SC_SCALE`.
 
 ### cuBNM rebuild (after yaml / kernel changes)
 ```bash
@@ -72,19 +104,8 @@ cd /scratch/home/wog3597/cubnm_build
 python codegen/generate_models.py
 pip install -e . --no-build-isolation
 ```
-
----
-
-## Diagnostic tools (standalone, GPU)
-
-| Tool | Purpose |
-|------|---------|
-| `sensitivity.py`        | forward FC parameter sweep (per-param FC response) |
-| `active_sensitivity.py` | sbi `ActiveSubspace` gradient sensitivity |
-| `fc_support_diag.py`    | per-param sensitivity + sensitive edges + empirical-in-sim-support test (`--prior_scale --io --gsr --fic --hetero`) |
-| `fic_tune.py`           | fast vectorized FIC → per-(sim,node) `J_i` |
-| `eib_tune.py`           | EIB per-edge effective-connectivity tuning (descriptive) |
-| `hcp_ceiling.py`        | param random-search FC-corr ceiling |
+The multi-coupling kernel surgery (`conn_state_vars` support) lives in a
+separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
 
 ---
 
@@ -92,18 +113,17 @@ pip install -e . --no-build-isolation
 
 | File | Purpose |
 |------|---------|
-| `main_HCP.py`            | HCP pipeline driver |
-| `data_loader_hcp.py`     | HCP FC/SC load, cortical slice, group-avg FC, SC scaling |
-| `engine_select.py`       | route active model (rwweib2 / rwweib / rww / vbi) |
-| `cuBNM/rww_eib_2cpl.yaml` | RWWEIB_2CPL model definition (codegen source) |
-| `cuBNM/runner_rwweib_2cpl.py` | param_lists builder + batch runner |
-| `cuBNM/simulate_rwweib_2cpl.py` | `simulate_gpu_batch` adapter |
-| `inference/`             | scalers, priors, SNPE-C, embedding, diagnostics |
-| `evaluate.py` / `evaluation/` | validation/test metrics, plots |
-| `PIPELINE.md`            | detailed per-stage documentation |
-
-The cuBNM multi-coupling kernel surgery (conn_state_vars support) lives in a
-separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
+| `main_HCP.py`                 | HCP pipeline driver; config @101-198, basis dispatch |
+| `basis_decoder.py`            | `BasisParamDecoder`, `get_decoder`; myelin/gradient decode |
+| `param_decoder.py`            | `decode_to_param_maps` dispatch |
+| `engine_select.py`            | route active model (rwweib2 / rwweib / rww / vbi) |
+| `data_loader_hcp.py`          | FC/SC load, 381→360 slice, SC scale, group-avg FC |
+| `cuBNM/rww_eib_2cpl.yaml`     | RWWEIB_2CPL model (2 couplings, `conn_state_vars:[S_E,S_I]`) |
+| `cuBNM/runner_rwweib_2cpl.py` | `build_param_lists`, `RWWEIB_2CPLSimGroup` |
+| `inference/feature_pipeline.py` | FC PCA-256 whiten |
+| `inference/snpe.py`           | SNPE-C; `nn.Identity` embedding; MAF |
+| `evaluation/`                 | validation/test metrics, plots (engine-routed) |
+| `docs/current_pipeline.md`    | full per-stage documentation |
 
 ---
 

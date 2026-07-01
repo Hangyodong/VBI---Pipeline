@@ -113,29 +113,45 @@ def print_final_summary(stage1_agg, stage2_agg, best_stage,
     s2_corr = stage2_agg["fc_corr_mean"] if stage2_agg else 0.0
     s2_rmse = stage2_agg["fc_rmse_mean"] if stage2_agg else 0.0
     s2_fcd = stage2_agg["fcd_rmse_mean"] if stage2_agg else 0.0
+    # Columns are STAGES (Stage 1 / Stage 2 = Phase1 vs Phase2/4 feature-select),
+    # NOT two subjects. Stage 2 is OFF when RUN_PHASE24=False -> stage2_agg None
+    # -> show "n/a" instead of a misleading +0.0000.
+    _s2_on = bool(stage2_agg)
+    _c2 = (lambda v: f"{v:>+.4f}") if _s2_on else (lambda v: f"{'n/a':>7}")
+    _r2 = (lambda v: f"{v:.4f}") if _s2_on else (lambda v: f"{'n/a':>6}")
     print("  +----------------+----------+----------+----------+")
-    print("  | Metric         |  Val S1  |  Val S2  |  Test    |")
+    print("  | Metric         |  Stage1  |  Stage2  |  Test    |")
     print("  +----------------+----------+----------+----------+")
     print(
         f"  | FC corr        |  {stage1_agg['fc_corr_mean']:>+.4f} "
-        f"|  {s2_corr:>+.4f} "
+        f"|  {_c2(s2_corr)} "
         f"|  {test_summary['fc_corr_boot_ci'][0]:>+.4f} |"
     )
     print(
         f"  | FC RMSE        |  {stage1_agg['fc_rmse_mean']:.4f} "
-        f"|  {s2_rmse:.4f} "
+        f"|  {_r2(s2_rmse)} "
         f"|  {test_summary['fc_rmse_boot_ci'][0]:.4f} |"
     )
     if use_fcd:
         print(
             f"  | FCD vec RMSE   |  {stage1_agg['fcd_rmse_mean']:.4f} "
-            f"|  {s2_fcd:.4f} "
+            f"|  {_r2(s2_fcd)} "
             f"|  {test_summary['fcd_rmse_boot_ci'][0]:.4f} |"
         )
     print("  +----------------+----------+----------+----------+")
+    print("  cols = Stage1 (Phase1 / full-FC posterior) | Stage2 (Phase2/4 "
+          "feature-select)" + ("" if _s2_on else ", OFF via RUN_PHASE24=False -> n/a")
+          + " | Test")
     print("\n  Test bootstrap 95% CI:")
-    _, lo, hi = test_summary["fc_corr_boot_ci"]
-    print(f"    FC corr   : [{lo:.4f}, {hi:.4f}]")
+    m, lo, hi = test_summary["fc_corr_boot_ci"]
+    print(f"    FC corr       : {m:.4f}  [{lo:.4f}, {hi:.4f}]  (per-draw mean)")
+    if "fc_corr_expected_boot_ci" in test_summary:
+        m, lo, hi = test_summary["fc_corr_expected_boot_ci"]
+        print(f"    FC corr(exp)  : {m:.4f}  [{lo:.4f}, {hi:.4f}]  (expected-FC)")
+    if "fc_corr_meantheta_boot_ci" in test_summary:
+        m, lo, hi = test_summary["fc_corr_meantheta_boot_ci"]
+        print(f"    FC corr(mean-θ): {m:.4f}  [{lo:.4f}, {hi:.4f}]  "
+              f"(posterior-mean theta)")
     _, lo, hi = test_summary["fc_rmse_boot_ci"]
     print(f"    FC RMSE   : [{lo:.4f}, {hi:.4f}]")
     if use_fcd:

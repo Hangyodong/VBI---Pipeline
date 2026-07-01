@@ -120,12 +120,21 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
             f"  (pre-built embedding_net)"
         )
 
-    density_estimator = posterior_nn(
+    _pnn_kwargs = dict(
         model=config.NDE_MODEL,
         embedding_net=embedding_net,
         hidden_features=config.NDE_HIDDEN,
         num_transforms=config.NDE_TRANSFORMS,
     )
+    # SC_CONDITION: x = [subject_row_index | fc_upper_tri]. sbi's default
+    # z_score_x="independent" would standardize the LEADING INDEX column too, so
+    # the encoder's `x[:,0].long()` SC-table lookup gets a fractional/out-of-range
+    # index (train indices {0,1} z-scored -> eval index 3 -> 5.0 -> long 5 ->
+    # CUDA index-out-of-bounds). Disable x z-scoring; the MultiChannelMatrixEmbedding
+    # owns its own normalization. Baseline (SC OFF) keeps the sbi default.
+    if bool(getattr(config, "SC_CONDITION", False)):
+        _pnn_kwargs["z_score_x"] = "none"
+    density_estimator = posterior_nn(**_pnn_kwargs)
     inferer = SNPE_C(
         prior=prior_scaled,
         density_estimator=density_estimator,
@@ -136,7 +145,10 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
         try:
             torch.set_float32_matmul_precision("high")   # H100 Tensor Core
             torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-            torch.backends.cudnn.benchmark = True
+            # S6: cudnn autotuner picks nondeterministic kernels. Skip it when
+            # DETERMINISTIC=1 so the posterior is bit-reproducible.
+            if not bool(getattr(config, "DETERMINISTIC", False)):
+                torch.backends.cudnn.benchmark = True
         except Exception:
             pass
 
@@ -152,7 +164,7 @@ def train_snpe(theta_scaled, x_input, prior_scaled, embedding_net=None,
     # ---- E7 / E8 — training-config + architecture banner ------------------
     _train_batch = 512        # 2048 → 512 (정규화 효과 / 과적합 완화)
     _max_epochs  = 200        # 300 → 200
-    _stop_after  = _max_epochs  # early stop 비활성화
+    _stop_after  = 15  # early stop ON: stop if val NLL no-improve 15 epochs (best restored)
     if verbose:
         _progress("[Step 8] SNPE-C training")
         print(
@@ -407,12 +419,19 @@ def step7_fit_param_scaler(verbose=True):
 
 def step8_train_snpe(theta_scaled, x_input, prior_scaled, verbose=True,
                      fc_raw=None, use_embedding=False,
-                     sc_matrix=None, sc_table=None, per_subject_sc=False):
-    """Step 8. Train single-round amortized SNPE-C."""
+                     sc_matrix=None, sc_table=None, per_subject_sc=False,
+                     embedding_net=None):
+    """Step 8. Train single-round amortized SNPE-C.
+
+    ``embedding_net`` (optional): a pre-built embedding module. When provided
+    it is forwarded to ``train_snpe`` unchanged (used by the SC_CONDITION
+    path to pass a ``MultiChannelMatrixEmbedding``). When None, behavior is
+    identical to before (Identity / factory-built embedding).
+    """
     t_step8 = time.time()
     posterior, embedding_net = train_snpe(
         theta_scaled, x_input, prior_scaled,
-        embedding_net=None, use_embedding=use_embedding,
+        embedding_net=embedding_net, use_embedding=use_embedding,
         proposal=None, verbose=verbose,
         fc_raw=fc_raw, sc_matrix=sc_matrix,
         sc_table=sc_table, per_subject_sc=per_subject_sc,

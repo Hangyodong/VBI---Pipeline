@@ -117,6 +117,7 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
     """Posterior sampling + re-simulation + FC/FCD comparison."""
     from simulator import extract_observed_features
     from inference import infer_subject_raw, compute_shrinkage_scaled
+    from inference.posterior import build_x_obs
 
     n_resim = n_resim or config.N_TEST_RESIM
     d = subject_data[sid]
@@ -128,7 +129,12 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
         _progress(f"evaluating {sid} (posterior sampling)")
 
     fc_obs_raw, fcd_obs_raw = extract_observed_features(d)
-    x_obs_input = feature_pipeline.transform(fc_obs_raw, fcd_obs_raw)
+    # SC_CONDITION OFF -> identical to before (FeaturePipeline.transform).
+    # SC_CONDITION ON  -> x = [row_index | fc_upper_tri] (encoder compresses FC).
+    x_obs_input = build_x_obs(
+        feature_pipeline, fc_obs_raw, fcd_obs_raw,
+        sid=sid, fc_matrix=d["fc"],
+    )
 
     t_infer = time.time()
     samples_raw, means_raw, stds_raw, samples_scaled = infer_subject_raw(
@@ -174,6 +180,50 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
         sid=sid, verbose=verbose, fc_nan=d.get("fc_nan"),
     )
 
+    # S1: expected-FC. Average the resim FC matrices over posterior draws (and
+    # their noise realizations), then score ONCE with the SAME fc_metrics + NaN
+    # mask. This denoises the single-run estimator — a stronger estimator, NOT a
+    # metric relaxation. Reported ALONGSIDE the per-draw mean (both kept).
+    if fc_preds:
+        fc_pred_mean = np.mean(np.stack(fc_preds, axis=0), axis=0)
+        m_exp = fc_metrics(fc_obs_full, fc_pred_mean, nan_mask=d.get("fc_nan"))
+        fc_corr_expected = m_exp["corr"]
+        fc_rmse_expected = m_exp["rmse"]
+    else:
+        fc_corr_expected, fc_rmse_expected = 0.0, 1.0
+
+    # ADDITIVE: posterior-MEAN-theta resim (the subject "digital twin" point
+    # estimate). Unlike expected-FC (which averages FC over DISTINCT posterior
+    # draws), this fixes ONE theta = mean of the posterior draws and resimulates
+    # it n_resim times to noise-average the SAME param set, then scores the mean
+    # FC once. Wrapped in try/except so it can NEVER crash evaluate_subject — on
+    # any failure the two keys fall back to 0.0 / 1.0. Does NOT replace anything.
+    fc_corr_meantheta, fc_rmse_meantheta = 0.0, 1.0
+    try:
+        theta_mean = np.asarray(samples_raw).mean(axis=0)        # (n_params,)
+        _, _, _, fc_preds_mt = _resimulate_and_score(
+            n_resim, np.tile(theta_mean[None, :], (n_resim, 1)),
+            param_names, fixed_overrides,
+            sc, dly, fc_obs_full, fcd_obs_raw, apply_bw,
+            sid=sid, verbose=False, fc_nan=d.get("fc_nan"),
+        )
+        if fc_preds_mt:
+            m_mt = fc_metrics(
+                fc_obs_full, np.mean(np.stack(fc_preds_mt, 0), 0),
+                nan_mask=d.get("fc_nan"),
+            )
+            fc_corr_meantheta = m_mt["corr"]
+            fc_rmse_meantheta = m_mt["rmse"]
+        if verbose:
+            print(
+                f"    FC corr(mean-theta) = {fc_corr_meantheta:.4f}  "
+                f"(posterior-mean theta, {len(fc_preds_mt)} resim)"
+            )
+    except Exception as e:
+        fc_corr_meantheta, fc_rmse_meantheta = 0.0, 1.0
+        if verbose:
+            print(f"    FC corr(mean-theta) skipped: {e}", flush=True)
+
     result = {
         "sid": sid,
         "samples_raw": samples_raw,
@@ -186,6 +236,10 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
         "fc_corr_mean": float(np.mean(fc_corrs)) if fc_corrs else 0.0,
         "fc_corr_std": float(np.std(fc_corrs)) if fc_corrs else 0.0,
         "fc_corr_all": fc_corrs,
+        "fc_corr_expected": float(fc_corr_expected),
+        "fc_rmse_expected": float(fc_rmse_expected),
+        "fc_corr_meantheta": float(fc_corr_meantheta),
+        "fc_rmse_meantheta": float(fc_rmse_meantheta),
         "fc_rmse_mean": float(np.mean(fc_rmses)) if fc_rmses else 1.0,
         "fc_rmse_std": float(np.std(fc_rmses)) if fc_rmses else 0.0,
         "fcd_rmse_mean": (
@@ -198,6 +252,10 @@ def evaluate_subject(sid, subject_data, posterior, param_scaler,
         print(
             f"    FC corr      = {result['fc_corr_mean']:.4f} ± "
             f"{result['fc_corr_std']:.4f}"
+        )
+        print(
+            f"    FC corr(exp) = {result['fc_corr_expected']:.4f}  "
+            f"(expected-FC: avg {len(fc_preds)} resim FC, score once)"
         )
         print(f"    FC RMSE      = {result['fc_rmse_mean']:.4f}")
         if getattr(config, "USE_FCD", True):
@@ -227,7 +285,7 @@ def _resimulate_and_score(n_resim, samples_raw, param_names,
     batch_label = f"resim({sid})" if sid else "resim"
     batch_kwargs = dict(
         delays=dly, apply_bw=apply_bw,
-        label=batch_label, n_total=n_resim,
+        label=batch_label, n_total=n_resim, subject_id=sid,
     )
     if fixed_overrides:
         batch_kwargs["fixed_overrides"] = fixed_overrides
@@ -278,47 +336,82 @@ def _resimulate_and_score(n_resim, samples_raw, param_names,
 
 def baseline_eval(sid, subject_data, n_resim=10, apply_bw=True,
                   verbose=True):
-    """Prior-midpoint baseline simulation."""
+    """Prior-midpoint baseline simulation.
+
+    The baseline theta is the prior midpoint in *raw* space, 0.5*(low+high)
+    per dimension, for every PARAMETER_MODE:
+
+    * homogeneous   -> 0.5*(lo+hi) per scalar param (legacy path below).
+    * basis_regionwise -> the coefficient prior is symmetric (e.g. U(-2, 2)),
+      so the midpoint is the ALL-ZERO coefficient vector. Decoding it gives
+      tanh(basis @ 0) = 0, i.e. every parameter maps to its bound MIDPOINT:
+      g_LRE=1.5 for (0,3), g_FFI=1.5 for (0,3), I_o=0.5 for (0,1),
+      sigma=0.025 for (0,0.05).
+    * direct/latent_regionwise -> 0.5*(lo+hi) per latent/region dim.
+
+    M1 fix: region-wise thetas are coefficient/latent names (e.g. ``g_LRE_const``)
+    that the simulator does NOT recognise as scalar params — passing them to
+    ``simulate_single`` would be silently ignored (defaults used), producing a
+    misleading baseline. So region-wise modes are routed through the SAME decoded
+    (latent_wrap-wrapped) batch simulator used by ``_resimulate_and_score``.
+    """
     from simulator import (
         compute_fc, compute_sim_fcd_matrix, fcd_to_upper_tri,
         extract_observed_features,
     )
-    from engine_select import get_simulate_single  # honor INFERENCE_MODEL
-    simulate_single = get_simulate_single()
+    from engine_select import is_regionwise
 
     d = subject_data[sid]
     fc_obs_full = d["fc"]
     fc_obs_raw, fcd_obs_raw = extract_observed_features(d)
-
-    params = {}
-    for n, lo, hi in zip(
-        config.STAGE1_PARAMS,
-        config.STAGE1_PRIOR_LOW,
-        config.STAGE1_PRIOR_HIGH,
-    ):
-        params[n] = 0.5 * (lo + hi)
-    params.update({"c_ee": 16.0, "c_ei": 12.0, "c_ie": 15.0, "c_ii": 3.0})
-
-    fc_corrs, fc_rmses, fcd_rmses = [], [], []
     use_fcd = bool(getattr(config, "USE_FCD", True))
-    for _ in range(n_resim):
-        try:
-            bolds = simulate_single(
-                d["sc"], params, n_repeat=1,
-                delays=d["delays"], apply_bw=apply_bw,
-            )
-            bold = bolds[0]
-            fc_pred = compute_fc(bold)
-            m = fc_metrics(fc_obs_full, fc_pred, nan_mask=d.get("fc_nan"))
-            fc_corrs.append(m["corr"])
-            fc_rmses.append(m["rmse"])
-            if use_fcd:
-                fcd_pred_vec = fcd_to_upper_tri(
-                    compute_sim_fcd_matrix(bold)
+
+    if is_regionwise():
+        # Decoded baseline: raw prior-midpoint theta -> wrapped batch sim.
+        low = np.asarray(config.STAGE1_PRIOR_LOW, dtype=np.float64)
+        high = np.asarray(config.STAGE1_PRIOR_HIGH, dtype=np.float64)
+        theta_mid = 0.5 * (low + high)                       # (theta_dim,)
+        theta_batch = np.tile(
+            theta_mid[None, :], (max(1, int(n_resim)), 1)).astype(np.float32)
+        # _resimulate_and_score uses get_simulate_gpu_batch() == latent_wrap,
+        # which decodes theta -> per-region maps before simulating.
+        fc_corrs, fc_rmses, fcd_rmses, _ = _resimulate_and_score(
+            theta_batch.shape[0], theta_batch, list(config.STAGE1_PARAMS),
+            None, d["sc"], d["delays"], fc_obs_full, fcd_obs_raw, apply_bw,
+            sid=f"baseline:{sid}", verbose=verbose, fc_nan=d.get("fc_nan"),
+        )
+    else:
+        from engine_select import get_simulate_single  # honor INFERENCE_MODEL
+        simulate_single = get_simulate_single()
+
+        params = {}
+        for n, lo, hi in zip(
+            config.STAGE1_PARAMS,
+            config.STAGE1_PRIOR_LOW,
+            config.STAGE1_PRIOR_HIGH,
+        ):
+            params[n] = 0.5 * (lo + hi)
+        params.update({"c_ee": 16.0, "c_ei": 12.0, "c_ie": 15.0, "c_ii": 3.0})
+
+        fc_corrs, fc_rmses, fcd_rmses = [], [], []
+        for _ in range(n_resim):
+            try:
+                bolds = simulate_single(
+                    d["sc"], params, n_repeat=1,
+                    delays=d["delays"], apply_bw=apply_bw,
                 )
-                fcd_rmses.append(fcd_vec_rmse(fcd_obs_raw, fcd_pred_vec))
-        except Exception:
-            continue
+                bold = bolds[0]
+                fc_pred = compute_fc(bold)
+                m = fc_metrics(fc_obs_full, fc_pred, nan_mask=d.get("fc_nan"))
+                fc_corrs.append(m["corr"])
+                fc_rmses.append(m["rmse"])
+                if use_fcd:
+                    fcd_pred_vec = fcd_to_upper_tri(
+                        compute_sim_fcd_matrix(bold)
+                    )
+                    fcd_rmses.append(fcd_vec_rmse(fcd_obs_raw, fcd_pred_vec))
+            except Exception:
+                continue
 
     out = {
         "fc_corr_mean": float(np.mean(fc_corrs)) if fc_corrs else 0.0,

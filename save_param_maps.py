@@ -25,7 +25,11 @@ def save_param_maps(posterior, feature_pipeline, param_scaler, subject_data,
     for sid in subjects:
         d = subject_data[sid]
         fc_obs_raw, fcd_obs_raw = extract_observed_features(d)
-        x = feature_pipeline.transform(fc_obs_raw, fcd_obs_raw)
+        # SC_CONDITION ON -> x=[idx|fc] (encoder input); OFF -> FeaturePipeline
+        # transform (unchanged). build_x_obs gates on config.SC_CONDITION.
+        from inference.posterior import build_x_obs
+        x = build_x_obs(feature_pipeline, fc_obs_raw, fcd_obs_raw,
+                        sid=int(sid), fc_matrix=d["fc"])
         _, zmean, _, _ = infer_subject_raw(
             posterior, x, param_scaler, n_samples=n_post, verbose=False)
         basis = None

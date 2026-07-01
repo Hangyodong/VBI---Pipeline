@@ -1,5 +1,8 @@
 # 02 — Modules
 
+> ⚠️ **LEGACY (mouse MPTP Wilson-Cowan, 115-region).** 현 HCP RWW-EIB 파이프라인과
+> 무관. 현재 모듈맵: `docs/current_pipeline.md` §2.
+
 ## 엔트리
 - `main_mouse.py` / `main_human.py` — 터미널 실행. PipelineConfig+setup_pipeline→pipeline_setup._apply_to_config
 - `main.ipynb` / `main_mouse.ipynb` / `main_human.ipynb` — notebook (동일 로직)

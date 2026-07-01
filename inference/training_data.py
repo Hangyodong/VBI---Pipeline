@@ -119,6 +119,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
     all_theta_r = []
     all_fc = []
     all_fcd = []
+    all_subj_ids = []
     _first_bold = None
     _first_sid = None
     t0 = time.time()
@@ -179,7 +180,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                         sc, chunk_r, param_names=param_names,
                         fixed_overrides=fixed_overrides,
                         delays=dly, apply_bw=apply_bw,
-                        label=str(sid), n_total=n_sim,
+                        label=str(sid), n_total=n_sim, subject_id=sid,
                     )
                 except Exception as e:
                     _emit(f"  batch {b_idx} failed: {e}")
@@ -190,12 +191,13 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                     _first_sid = sid
 
                 future = executor.map(worker_extract, bolds, chunksize=16)
-                future_queue.append((chunk_s, chunk_r, future))
+                future_queue.append((chunk_s, chunk_r, future, sid))
 
                 while len(future_queue) >= 2:
                     _drain_one_future(
                         future_queue.pop(0),
                         all_theta_s, all_theta_r, all_fc, all_fcd,
+                        all_subj_ids,
                     )
 
                 if verbose:
@@ -220,6 +222,7 @@ def collect_training_data(subjects, subject_data, prior_scaled,
                 _drain_one_future(
                     queued,
                     all_theta_s, all_theta_r, all_fc, all_fcd,
+                    all_subj_ids,
                 )
 
             cp.get_default_memory_pool().free_all_blocks()
@@ -242,6 +245,10 @@ def collect_training_data(subjects, subject_data, prior_scaled,
     theta_r = np.array(all_theta_r, dtype=np.float32)
     fc_raw = np.array(all_fc, dtype=np.float32)
     fcd_raw = np.array(all_fcd, dtype=np.float32)
+    # Per-simulation subject-id array, aligned with fc_raw rows (one entry
+    # per finite sim). Travels only via the save_first_sample dict so the
+    # legacy 4-tuple return contract stays unchanged.
+    subj_ids = np.array(all_subj_ids, dtype=np.int64)
     if (
         fc_selected_indices is not None
         and fc_raw.ndim == 2
@@ -285,15 +292,27 @@ def collect_training_data(subjects, subject_data, prior_scaled,
             "theta_raw": theta_r,
             "fc_raw": fc_raw,
             "fcd_raw": fcd_raw,
+            "subj_ids": subj_ids,
             "diag_bold": _first_bold,
             "diag_sid": _first_sid,
         }
     return theta_s, theta_r, fc_raw, fcd_raw
 
 
-def _drain_one_future(queued, all_theta_s, all_theta_r, all_fc, all_fcd):
-    """Append finite results from one future onto the accumulator lists."""
-    tcs, tcr, future = queued
+def _drain_one_future(queued, all_theta_s, all_theta_r, all_fc, all_fcd,
+                      all_subj_ids=None):
+    """Append finite results from one future onto the accumulator lists.
+
+    ``queued`` is ``(chunk_s, chunk_r, future[, sid])``. The optional 4th
+    element ``sid`` is the subject id for every sim in this batch (each
+    batch belongs to exactly one subject). When both ``all_subj_ids`` and
+    ``sid`` are present, one ``int(sid)`` is appended per finite row so the
+    subject-id list stays aligned with ``all_fc``. Backward compatible: a
+    legacy 3-tuple ``queued`` (no ``sid``) or omitting ``all_subj_ids``
+    leaves the subject-id accumulation a no-op.
+    """
+    sid = queued[3] if len(queued) > 3 else None
+    tcs, tcr, future = queued[0], queued[1], queued[2]
     for i, res in enumerate(future):
         if res is None:
             continue
@@ -305,6 +324,8 @@ def _drain_one_future(queued, all_theta_s, all_theta_r, all_fc, all_fcd):
         all_theta_r.append(tcr[i].tolist())
         all_fc.append(fc_vec)
         all_fcd.append(fcd_vec)
+        if all_subj_ids is not None and sid is not None:
+            all_subj_ids.append(int(sid))
 
 
 # ---------------------------------------------------------------------------
@@ -396,21 +417,28 @@ def step3_summary_features(fc_raw, fcd_raw, verbose=True):
 
 def save_extracted_features(theta_scaled, theta_raw, fc_raw, fcd_raw,
                             param_names=None, save_dir=None,
-                            tag="stage1", verbose=True):
-    """Save raw extracted features (pre-embedding) to disk."""
+                            tag="stage1", verbose=True, subj_ids=None):
+    """Save raw extracted features (pre-embedding) to disk.
+
+    ``subj_ids`` (optional) is the per-simulation subject-id array aligned
+    with ``fc_raw`` rows; when provided it is stored under the ``subj_ids``
+    key. Omitting it keeps the npz in the legacy format (no extra key).
+    """
     save_dir = save_dir or config.OUTPUT_DIR
     param_names = param_names or config.STAGE1_PARAMS
     os.makedirs(save_dir, exist_ok=True)
 
     path = os.path.join(save_dir, f"features_{tag}.npz")
-    np.savez_compressed(
-        path,
+    _arrays = dict(
         theta_scaled=theta_scaled,
         theta_raw=theta_raw,
         fc_raw=fc_raw,
         fcd_raw=fcd_raw,
         param_names=np.array(param_names),
     )
+    if subj_ids is not None:
+        _arrays["subj_ids"] = subj_ids
+    np.savez_compressed(path, **_arrays)
 
     if verbose:
         n_mb = os.path.getsize(path) / 1024 / 1024
@@ -439,4 +467,74 @@ def load_extracted_features(save_dir=None, tag="stage1"):
         "fc_raw": data["fc_raw"],
         "fcd_raw": data["fcd_raw"],
         "param_names": list(data["param_names"]),
+        "subj_ids": data["subj_ids"] if "subj_ids" in data else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# CPU self-test (no GPU, no cupy) — run: python inference/training_data.py
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import tempfile
+
+    # (a) _drain_one_future: one None (dropped) + two finite rows, sid=77.
+    fc_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    fcd_vec = np.array([0.4, 0.5], dtype=np.float32)
+    fc_vec2 = np.array([1.1, 1.2, 1.3], dtype=np.float32)
+    fcd_vec2 = np.array([1.4, 1.5], dtype=np.float32)
+
+    chunk_s = np.array(
+        [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]], dtype=np.float32
+    )
+    chunk_r = np.array(
+        [[10.0, 11.0], [12.0, 13.0], [14.0, 15.0]], dtype=np.float32
+    )
+    results = [(fc_vec, fcd_vec), None, (fc_vec2, fcd_vec2)]
+    queued = (chunk_s, chunk_r, results, 77)
+
+    a_ts, a_tr, a_fc, a_fcd, a_sid = [], [], [], [], []
+    _drain_one_future(queued, a_ts, a_tr, a_fc, a_fcd, a_sid)
+    assert a_sid == [77, 77], f"subj_ids mismatch: {a_sid!r}"
+    assert len(a_sid) == len(a_fc) == 2, (
+        f"len mismatch: subj_ids={len(a_sid)} fc={len(a_fc)}"
+    )
+
+    # backward safety: legacy 3-tuple + no all_subj_ids must still work.
+    b_ts, b_tr, b_fc, b_fcd = [], [], [], []
+    _drain_one_future((chunk_s, chunk_r, results), b_ts, b_tr, b_fc, b_fcd)
+    assert len(b_fc) == 2, f"legacy 3-tuple drain broke: {len(b_fc)}"
+
+    # (b) save/load roundtrip with subj_ids.
+    with tempfile.TemporaryDirectory() as tmp:
+        theta_scaled = np.zeros((3, 2), dtype=np.float32)
+        theta_raw = np.zeros((3, 2), dtype=np.float32)
+        fc_raw = np.zeros((3, 3), dtype=np.float32)
+        fcd_raw = np.zeros((3, 2), dtype=np.float32)
+        sids = np.array([1, 1, 2], dtype=np.int64)
+
+        save_extracted_features(
+            theta_scaled, theta_raw, fc_raw, fcd_raw,
+            param_names=["a", "b"], save_dir=tmp, tag="selftest",
+            verbose=False, subj_ids=sids,
+        )
+        loaded = load_extracted_features(save_dir=tmp, tag="selftest")
+        assert loaded["subj_ids"] is not None, "subj_ids missing after load"
+        assert np.array_equal(loaded["subj_ids"], sids), (
+            f"subj_ids roundtrip mismatch: {loaded['subj_ids']!r}"
+        )
+
+        # save WITHOUT subj_ids -> load returns None (legacy format).
+        save_extracted_features(
+            theta_scaled, theta_raw, fc_raw, fcd_raw,
+            param_names=["a", "b"], save_dir=tmp, tag="selftest_nosid",
+            verbose=False,
+        )
+        loaded_no = load_extracted_features(
+            save_dir=tmp, tag="selftest_nosid"
+        )
+        assert loaded_no["subj_ids"] is None, (
+            f"expected subj_ids=None, got {loaded_no['subj_ids']!r}"
+        )
+
+    print("training_data subj_ids self-test: ALL PASS")
