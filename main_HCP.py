@@ -51,7 +51,7 @@ if SMOKE:
 
 cfg = PipelineConfig(
     # ── Paths (HCP) ──────────────────────────────────────────
-    DATA_DIR   = "/scratch/home/wog3597/vbi",
+    DATA_DIR   = "/scratch/home/wog3597/vbi/HCP_Data",
     OUTPUT_DIR = "./output_hcp",
     FC_FILE    = "HCP_FC.mat",       # var 'C' (n,2): col0 id, col1 FC(381,381)
     SC_FILE    = os.environ.get("SC_FILE", "HCP_CABNP381_SC_first100.mat"),  # CAB-NP 381 SC
@@ -143,9 +143,10 @@ config.USE_NETWORK_BASIS  = True
 config.SAVE_PARAM_MAPS    = True
 config.NETWORK_LABELS_CSV = None    # optional atlas network labels (row-aligned); None -> const+Laplacian only
 # basis_regionwise: SBI infers basis coefficients (theta_dim=n_params x basis_dim);
-# BasisParamDecoder maps them via map=mid+half*tanh(basis@beta). basis.npy=[const,
-# myelin,gradient] (381,3). bounds below override HETERO_BOUNDS in that mode.
-config.BASIS_PATH         = os.environ.get("BASIS_PATH", "basis.npy")
+# BasisParamDecoder maps them via map=mid+half*tanh(basis@beta). Active basis =
+# HCP_Data/basis_cortex.npy [const, myelin_z, gradient_z] (360,3) — cortex-only
+# FC gradient (extract_gradient_cortex.py). bounds below override HETERO_BOUNDS.
+config.BASIS_PATH         = os.environ.get("BASIS_PATH", "HCP_Data/basis_cortex.npy")
 config.BASIS_REZSCORE     = True
 # S5: coupling upper bound is env-tunable (G_BOUND_HIGH, default 3.0 = current).
 # Old wide-bound runs showed the posterior pushing g_LRE/g_FFI toward ~7, so the

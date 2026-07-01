@@ -7,7 +7,7 @@ optimized_params/
 dbs_analysis/
 
 # 예외: 활성 SC 데이터셋(43M, GitHub 한도 내) — 큰 HCP_FC/HCP_SC.mat은 계속 제외
-!HCP_CABNP381_SC_first100.mat
+!HCP_Data/HCP_CABNP381_SC_first100.mat
 
 # vim 스왑
 *.swp
