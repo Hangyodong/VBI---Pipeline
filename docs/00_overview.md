@@ -1,5 +1,8 @@
 # 00 — Overview
 
+> ⚠️ **LEGACY (mouse MPTP Wilson-Cowan, 115-region).** 현 HCP RWW-EIB 파이프라인과
+> 무관. 현재 파이프라인: `docs/current_pipeline.md` + `CLAUDE.md`.
+
 ## 목적
 Wilson-Cowan(WC) neural mass 모델을 cuBNM GPU 엔진으로 시뮬하고, SBI(SNPE-C)로 subject별 WC 파라미터를 추론하는 파이프라인. 대상: Mouse MPTP, 115 region, ctr+MPTP 그룹.
 

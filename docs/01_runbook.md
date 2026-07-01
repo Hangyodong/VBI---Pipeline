@@ -1,5 +1,8 @@
 # 01 — Runbook
 
+> ⚠️ **LEGACY (mouse MPTP Wilson-Cowan, 115-region).** 현 HCP RWW-EIB 파이프라인과
+> 무관. 현재 실행법: `CLAUDE.md` Launch + `docs/current_pipeline.md`.
+
 ## 풀 파이프라인
 ```bash
 python main_mouse.py          # mouse MPTP (config.py 권위)

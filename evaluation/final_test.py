@@ -58,6 +58,16 @@ def final_test(test_subjects, subject_data, best_stage=1,
     fc_corr_boot = bootstrap_ci(all_fc_corrs)
     fc_rmse_boot = bootstrap_ci([r["fc_rmse_mean"] for r in results])
     fcd_rmse_boot = bootstrap_ci([r["fcd_rmse_mean"] for r in results])
+    # S1: expected-FC bootstrap over per-subject expected-FC scores (one per
+    # subject, computed from the averaged resim FC). Reported alongside.
+    fc_corr_exp_boot = bootstrap_ci(
+        [r.get("fc_corr_expected", 0.0) for r in results])
+    fc_rmse_exp_boot = bootstrap_ci(
+        [r.get("fc_rmse_expected", 1.0) for r in results])
+    # ADDITIVE: bootstrap over per-subject posterior-mean-theta FC corr (the
+    # subject "digital twin" point-estimate). Reported alongside per-draw/exp.
+    fc_corr_mt_boot = bootstrap_ci(
+        [r.get("fc_corr_meantheta", 0.0) for r in results])
 
     test_summary = {
         "best_stage": 1,
@@ -65,6 +75,9 @@ def final_test(test_subjects, subject_data, best_stage=1,
         "fc_corr_boot_ci": fc_corr_boot,
         "fc_rmse_boot_ci": fc_rmse_boot,
         "fcd_rmse_boot_ci": fcd_rmse_boot,
+        "fc_corr_expected_boot_ci": fc_corr_exp_boot,
+        "fc_rmse_expected_boot_ci": fc_rmse_exp_boot,
+        "fc_corr_meantheta_boot_ci": fc_corr_mt_boot,
     }
     if verbose:
         _progress(f"final test done ({time.time() - t0:.1f}s)")
@@ -103,9 +116,19 @@ def _print_test_summary(test_summary):
     use_fcd = bool(getattr(config, "USE_FCD", True))
     print("\n  Test results (bootstrap 95% CI)")
     m, lo, hi = test_summary["fc_corr_boot_ci"]
-    print(f"    FC corr   : {m:.4f}  [{lo:.4f}, {hi:.4f}]")
+    print(f"    FC corr       : {m:.4f}  [{lo:.4f}, {hi:.4f}]  (per-draw mean)")
+    if "fc_corr_expected_boot_ci" in test_summary:
+        m, lo, hi = test_summary["fc_corr_expected_boot_ci"]
+        print(f"    FC corr(exp)  : {m:.4f}  [{lo:.4f}, {hi:.4f}]  (expected-FC)")
+    if "fc_corr_meantheta_boot_ci" in test_summary:
+        m, lo, hi = test_summary["fc_corr_meantheta_boot_ci"]
+        print(f"    FC corr(mean-θ): {m:.4f}  [{lo:.4f}, {hi:.4f}]  "
+              f"(posterior-mean theta)")
     m, lo, hi = test_summary["fc_rmse_boot_ci"]
-    print(f"    FC RMSE   : {m:.4f}  [{lo:.4f}, {hi:.4f}]")
+    print(f"    FC RMSE       : {m:.4f}  [{lo:.4f}, {hi:.4f}]")
+    if "fc_rmse_expected_boot_ci" in test_summary:
+        m, lo, hi = test_summary["fc_rmse_expected_boot_ci"]
+        print(f"    FC RMSE(exp)  : {m:.4f}  [{lo:.4f}, {hi:.4f}]")
     if use_fcd:
         m, lo, hi = test_summary["fcd_rmse_boot_ci"]
         print(f"    FCD RMSE  : {m:.4f}  [{lo:.4f}, {hi:.4f}]")

@@ -108,11 +108,14 @@ FS_BOLD = 1.0 / TR_SEC
 # HRF (TVB MixtureOfGammas)
 # ---------------------------------------------------------------------------
 # equation: (l*t)^(a1-1)*exp(-l*t)/gamma(a1) - c*(l*t)^(a2-1)*exp(-l*t)/gamma(a2)
-# Mouse fMRI: peak ~3s (human: ~6s), undershoot ~7s (human: ~13s)
-HRF_A1 = 3.0          # shape of positive gamma  (peak ~ a1/l sec)
-HRF_A2 = 7.0          # shape of undershoot gamma
+# NOTE: these gamma-HRF params ONLY feed the hrf="vbi" MixtureOfGammas path (bold.py).
+# Production rwweib2 sims use hrf="bw" (cuBNM Balloon-Windkessel), so changing them does
+# NOT affect current FC. Set to HUMAN canonical (was mouse: A1=3 -> peak ~3s) for the
+# case the vbi path is ever used on HCP.
+HRF_A1 = 6.0          # human: response peak ~6s (a1/l)
+HRF_A2 = 16.0         # human: undershoot peak ~16s
 HRF_L = 1.0           # rate parameter
-HRF_C = 0.3           # undershoot amplitude ratio (mouse weaker than human)
+HRF_C = 0.167         # human undershoot amplitude ratio (~1/6)
 HRF_LENGTH_SEC = 32.0  # kernel length (sec)
 
 

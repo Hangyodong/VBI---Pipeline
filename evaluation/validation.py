@@ -231,6 +231,10 @@ def _empty_validation_agg(stage, param_names):
     return {
         "stage": stage,
         "fc_corr_mean": nan,
+        "fc_corr_expected_mean": nan,
+        "fc_rmse_expected_mean": nan,
+        "fc_corr_meantheta_mean": nan,
+        "fc_rmse_meantheta_mean": nan,
         "fc_rmse_mean": nan,
         "fcd_rmse_mean": nan,
         "shrinkage_mean": empty,
@@ -245,6 +249,18 @@ def _aggregate_validation(results, stage, param_names):
         "stage": stage,
         "fc_corr_mean": float(np.mean(
             [r["fc_corr_mean"] for r in results]
+        )),
+        "fc_corr_expected_mean": float(np.mean(
+            [r.get("fc_corr_expected", 0.0) for r in results]
+        )),
+        "fc_rmse_expected_mean": float(np.mean(
+            [r.get("fc_rmse_expected", 1.0) for r in results]
+        )),
+        "fc_corr_meantheta_mean": float(np.mean(
+            [r.get("fc_corr_meantheta", 0.0) for r in results]
+        )),
+        "fc_rmse_meantheta_mean": float(np.mean(
+            [r.get("fc_rmse_meantheta", 1.0) for r in results]
         )),
         "fc_rmse_mean": float(np.mean(
             [r["fc_rmse_mean"] for r in results]
@@ -265,7 +281,11 @@ def _aggregate_validation(results, stage, param_names):
 
 def _print_validation_summary(agg, label):
     print(f"\n  [{label} aggregate]")
-    print(f"    FC corr   : {agg['fc_corr_mean']:.4f}")
+    print(f"    FC corr       : {agg['fc_corr_mean']:.4f}  (per-draw mean)")
+    print(f"    FC corr(exp)  : {agg.get('fc_corr_expected_mean', float('nan')):.4f}  "
+          f"(expected-FC)")
+    print(f"    FC corr(mean-θ): {agg.get('fc_corr_meantheta_mean', float('nan')):.4f}  "
+          f"(posterior-mean theta)")
     print(f"    FC RMSE   : {agg['fc_rmse_mean']:.4f}")
     if getattr(config, "USE_FCD", True):
         print(f"    FCD RMSE  : {agg['fcd_rmse_mean']:.4f}")

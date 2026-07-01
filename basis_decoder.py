@@ -115,7 +115,10 @@ def get_decoder(config):
     R = int(config.N_REGIONS)
     params = tuple(config.HETERO_PARAMS)
     bounds = getattr(config, "HETERO_BOUNDS", None)
-    key = (path, R, params)
+    # bounds MUST be part of the key: otherwise a decoder built early with the
+    # wide homogeneous HETERO_BOUNDS (e.g. at the startup banner) is reused even
+    # after BASIS_BOUNDS overrides them -> decode uses the wrong (0-9) range.
+    key = (path, R, params, tuple(sorted((bounds or {}).items())))
     if key not in _DECODER_CACHE:
         _DECODER_CACHE[key] = BasisParamDecoder.from_file(
             path, list(params), bounds=bounds, n_regions=R,
@@ -144,3 +147,53 @@ def qc_decode(decoder, thetas, save_dir=None, tag="qc", verbose=True):
         if verbose:
             print(f"    saved -> {d}/{tag}_<param>.npy")
     return maps
+
+
+# ── per-subject myelin/gradient basis ────────────────────────────────────────
+_PERSUBJ_DEC_CACHE = {}
+
+
+def _rezscore_basis(b):
+    """z-score non-constant columns in place-safe copy (matches from_file rezscore)."""
+    b = np.array(b, dtype=np.float64, copy=True)
+    for j in range(b.shape[1]):
+        col = b[:, j]
+        if np.allclose(col, col[0]):           # constant column -> keep
+            continue
+        s = col.std()
+        b[:, j] = (col - col.mean()) / (s if s > 0 else 1.0)
+    return b
+
+
+def get_decoder_for_basis(basis_array, params, bounds=None, rezscore=True):
+    """BasisParamDecoder from an IN-MEMORY basis array (per-subject), cached by
+    rezscored-basis content + params + bounds. Mirrors get_decoder for one subject."""
+    b = np.ascontiguousarray(np.asarray(basis_array, dtype=np.float64))
+    if rezscore:
+        b = _rezscore_basis(b)
+    key = (b.tobytes(), tuple(params), tuple(sorted((bounds or {}).items())))
+    if key not in _PERSUBJ_DEC_CACHE:
+        _PERSUBJ_DEC_CACHE[key] = BasisParamDecoder(b, list(params), bounds=bounds)
+    return _PERSUBJ_DEC_CACHE[key]
+
+
+def build_persubject_bases(sc_file, myelin_path="myelin_subjects.npy",
+                           gradient_path="gradient_subjects.npy", n_regions=360):
+    """{subject_id -> (n_regions,3) raw basis [const, myelin_s, gradient_s]}.
+
+    Rows of myelin/gradient_subjects.npy are aligned to the SC file's `sub_num`
+    (ascending subject id) — user-confirmed. const=ones; rezscore is applied later
+    in get_decoder_for_basis (per-subject, on the n_regions slice)."""
+    import scipy.io as sio
+    d = sio.loadmat(sc_file)
+    sub_num = np.asarray(d["sub_num"]).ravel().astype(int)
+    my = np.load(myelin_path); gr = np.load(gradient_path)
+    if not (len(sub_num) == my.shape[0] == gr.shape[0]):
+        raise ValueError(f"row mismatch: sub_num={len(sub_num)} "
+                         f"myelin={my.shape} gradient={gr.shape}")
+    R_full = my.shape[1]
+    out = {}
+    for i, sid in enumerate(sub_num):
+        basis = np.column_stack([np.ones(R_full), my[i], gr[i]])[:n_regions]
+        out[int(sid)] = np.ascontiguousarray(basis, dtype=np.float64)
+    return out
