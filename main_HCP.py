@@ -67,7 +67,7 @@ cfg = PipelineConfig(
     SEED       = 42,
 
     # ── Simulation ───────────────────────────────────────────
-    N_SIM      = _envi("N_SIM", 64 if SMOKE else 2_000),
+    N_SIM      = _envi("N_SIM", 64 if SMOKE else 1_000),   # per-subject sims (real)
     GPU_BATCH  = _envi("GPU_BATCH", 64 if SMOKE else 2_000),
 
     # ── Simulation time (ms) — HCP rfMRI TR=0.72s; 875 TR total, 1min cut ─
@@ -75,11 +75,11 @@ cfg = PipelineConfig(
     # whole number of SECONDS: runner_rwweib_2cpl does T_END/1000 -> seconds and cuBNM
     # rejects durations not expressible in whole ms (622.08s -> 622080.0000409 ms ->
     # ALL sims fail). 630000 = 630.0s = 875 TR (multiple of both 1000ms and 720ms).
-    T_END_MS   = 630_000.0,          # 875 TR total (630.0 s ~ 10.5 min) — clean seconds
-    T_CUT_MS   =  60_000.0,          # cut first 1 min transient -> 791 TR analyzed
+    T_END_MS   = 864_000.0,          # 1200 TR total (864.0 s = HCP run length: 1200 x 0.72s)
+    T_CUT_MS   =  30_000.0,          # cut first 30 s transient -> 1158 TR analyzed
     DT         = 1.0,                # RWW Euler step (ms)
     DECIMATE   = 720,                # neural stored dt = DT*DECIMATE = 720ms
-    TR_SEC     = 0.72,               # BOLD sampling period (s) -> 791 TR analysis
+    TR_SEC     = 0.72,               # BOLD sampling period (s) -> 1158 TR analysis
 
     # ── HRF ──────────────────────────────────────────────────
     # human HRF (was mouse A1=3/A2=7). Only used by hrf="vbi"; production = bw.
@@ -963,10 +963,20 @@ else:
 # is unchanged.
 if getattr(config, "SC_CONDITION", False):
     from inference.embedding import MultiChannelMatrixEmbedding
+    # C-encoder fix: SC_FUSION=film makes SC MULTIPLICATIVELY gate the FC tokens
+    # + adds a direct SC path to the head, so the encoder can no longer ignore
+    # the SC channel for free (baseline "add" fusion zeroed it out -> SC-perm
+    # delta~0). FC_TOKEN_DROPOUT>0 further discourages FC-only shortcuts. Both
+    # are post-cache (Step 8 only) so features_stage1.npz is REUSED (no re-sim).
+    _sc_fusion = os.environ.get("SC_FUSION", "add")
+    _fc_tok_drop = float(os.environ.get("FC_TOKEN_DROPOUT", "0.0"))
+    print(f"\n  [C-encoder] SC fusion = {_sc_fusion!r}  "
+          f"fc_token_dropout = {_fc_tok_drop}")
     _emb = MultiChannelMatrixEmbedding(
         fc_input_dim=config.FC_DIM, sc_table=SC_TABLE,
         out_dim=config.EMBED_DIM, n_regions=config.N_REGIONS,
         use_fc_mask=True,
+        fusion=_sc_fusion, fc_token_dropout=_fc_tok_drop,
     )
     _USE_EMBEDDING = True
     posterior, embedding_net = inference.step8_train_snpe(
@@ -1329,6 +1339,19 @@ for _i in range(0, len(_per), _grp):
 
 # Result
 evaluate.report_step14(test_summary)
+
+# ── Export test simulated + empirical FC matrices to CSV ──────────────────
+# Per test subject: sim_fc_<sid>.csv (expected/mean resim FC), emp_fc_<sid>.csv
+# (target), node_fit_<sid>.csv (per-region sim-vs-emp FC-row corr) + a
+# node_fit_summary.csv (region x subject). node_fit is the probe for the
+# front/back label-order fit asymmetry. Disable with EXPORT_FC_CSV=0.
+if os.environ.get("EXPORT_FC_CSV", "1") == "1":
+    try:
+        from evaluation.export_fc_csv import export_test_fc_csv
+        export_test_fc_csv(test_summary, subject_data, config.OUTPUT_DIR,
+                           verbose=True)
+    except Exception as _e:
+        print(f"  [export FC CSV] skipped: {type(_e).__name__}: {_e}")
 
 # ── Region-wise parameter maps (latent_regionwise or direct_regionwise) ─────
 if (str(getattr(config, "PARAMETER_MODE", "homogeneous"))
