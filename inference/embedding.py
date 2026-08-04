@@ -384,7 +384,8 @@ class MultiChannelMatrixEmbedding(_EMBED_BASE):
 
     def __init__(self, fc_input_dim, sc_table, out_dim=None, n_regions=None,
                  d_model=None, n_heads=None, n_layers=None,
-                 n_sc_channels=None, use_fc_mask=True):
+                 n_sc_channels=None, use_fc_mask=True,
+                 fusion="add", fc_token_dropout=0.0):
         if not _TORCH_AVAILABLE:
             raise ImportError("torch is required for MultiChannelMatrixEmbedding")
         super().__init__()
@@ -435,9 +436,40 @@ class MultiChannelMatrixEmbedding(_EMBED_BASE):
         else:
             token_input_dim = self.n_regions
         self.token_proj = nn.Linear(token_input_dim, self.d_model)
-        self.sc_proj = nn.ModuleList([
-            nn.Linear(self.n_regions, self.d_model) for _ in range(C)
-        ])
+        # ── SC fusion mode ───────────────────────────────────────────────
+        # "add"  : SC projected and ADDED to FC tokens (original behaviour).
+        #          The SC branch is a droppable additive offset, so SGD can —
+        #          and empirically does — zero it out (SC-permutation delta~0).
+        # "film" : SC produces per-region (gamma, beta) that MULTIPLICATIVELY
+        #          modulate the FC tokens (tok*(1+tanh(gamma))+beta) PLUS a
+        #          direct SC-summary feature concatenated at the head. SC now
+        #          gates the FC pathway and reaches the output on its own, so
+        #          it can no longer be ignored for free. gamma/beta are
+        #          zero-initialised -> training starts at FC-only (identity),
+        #          a stable warm start, then learns the SC modulation.
+        self.fusion = str(fusion or "add").lower()
+        if self.fusion not in ("add", "film"):
+            raise ValueError(f"fusion must be 'add' or 'film'; got {self.fusion!r}")
+        self.fc_token_dropout = float(fc_token_dropout or 0.0)
+        self._fc_drop = (nn.Dropout(self.fc_token_dropout)
+                         if self.fc_token_dropout > 0 else None)
+
+        if self.fusion == "add":
+            self.sc_proj = nn.ModuleList([
+                nn.Linear(self.n_regions, self.d_model) for _ in range(C)
+            ])
+            head_in = self.d_model
+        else:                                   # film
+            self.sc_film = nn.ModuleList([
+                nn.Linear(self.n_regions, 2 * self.d_model) for _ in range(C)
+            ])
+            for _lin in self.sc_film:           # zero-init -> FC-only warm start
+                nn.init.zeros_(_lin.weight)
+                nn.init.zeros_(_lin.bias)
+            self.sc_summary_proj = nn.ModuleList([
+                nn.Linear(self.n_regions, self.d_model) for _ in range(C)
+            ])
+            head_in = 2 * self.d_model          # [CLS | SC-summary]
 
         self.cls = nn.Parameter(torch.randn(1, 1, self.d_model) * 0.02)
         self.layers = nn.ModuleList([
@@ -450,7 +482,7 @@ class MultiChannelMatrixEmbedding(_EMBED_BASE):
             for _ in range(self.n_layers)
         ])
         self.norm = nn.LayerNorm(self.d_model)
-        self.head = nn.Linear(self.d_model, self.out_dim)
+        self.head = nn.Linear(head_in, self.out_dim)
 
         # Eval-time override: (C, N, N) tensor for one test subject.
         self.override_sc_channels = None
@@ -500,14 +532,34 @@ class MultiChannelMatrixEmbedding(_EMBED_BASE):
             mat = self._scatter_to_matrix(fc)                  # (B,N,N)
             tok = self.token_proj(mat)                         # (B,N,d_model)
 
+        # Optional FC-token dropout: discourages the encoder from solving the
+        # inversion off FC alone, pushing it to lean on the SC channel.
+        if self._fc_drop is not None:
+            tok = self._fc_drop(tok)
+
         # SC channels (subject-constant): table lookup or eval override.
         if self.override_sc_channels is not None:
             sc = self.override_sc_channels.to(tok.dtype).to(tok.device)
             sc = sc.unsqueeze(0).expand(B, -1, -1, -1)         # (B,C,N,N)
         else:
             sc = self.sc_table[subj_idx]                       # (B,C,N,N)
-        for c in range(self.n_sc_channels):
-            tok = tok + self.sc_proj[c](sc[:, c])              # (B,N,d_model)
+
+        sc_summary = None
+        if self.fusion == "add":
+            for c in range(self.n_sc_channels):
+                tok = tok + self.sc_proj[c](sc[:, c])          # (B,N,d_model)
+        else:                                                  # film
+            gamma = tok.new_zeros(tok.shape)                   # (B,N,d_model)
+            beta  = tok.new_zeros(tok.shape)
+            summ  = tok.new_zeros(B, self.d_model)             # (B,d_model)
+            for c in range(self.n_sc_channels):
+                gb = self.sc_film[c](sc[:, c])                 # (B,N,2*d_model)
+                gamma = gamma + gb[..., :self.d_model]
+                beta  = beta  + gb[..., self.d_model:]
+                summ  = summ + self.sc_summary_proj[c](sc[:, c]).mean(dim=1)
+            # Multiplicative SC gate on FC tokens (SC cannot be a free offset).
+            tok = tok * (1.0 + torch.tanh(gamma)) + beta
+            sc_summary = summ                                  # direct SC path
 
         # CLS + Transformer.
         cls = self.cls.expand(B, -1, -1)                       # (B,1,d_model)
@@ -515,7 +567,10 @@ class MultiChannelMatrixEmbedding(_EMBED_BASE):
         for layer in self.layers:
             h = layer(h)
         h = self.norm(h)
-        return self.head(h[:, 0, :])                           # (B, out_dim)
+        cls_out = h[:, 0, :]                                    # (B, d_model)
+        if sc_summary is not None:
+            cls_out = torch.cat([cls_out, sc_summary], dim=1)  # (B, 2*d_model)
+        return self.head(cls_out)                              # (B, out_dim)
 
 
 # ---------------------------------------------------------------------------
