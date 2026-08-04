@@ -148,10 +148,31 @@ Test-set FC correlation, 20 held-out subjects, bootstrap 95% CI. All runs:
 
 Read the three columns as three estimators of the same thing, not as three
 results: *per-draw mean* scores each posterior draw's resim separately and
-averages the scores; *expected-FC* averages the resim FC matrices first and
-scores once (denoised, so it reads highest); *mean-θ* fixes one θ = posterior
-mean and noise-averages that. Per-subject spread is wide — the 2026-07-03 run
-ranged from 0.16 to 0.53 expected-FC across its 20 test subjects.
+averages the 20×10 scores; *expected-FC* averages the 10 resim FC matrices
+first and scores once, so it reads highest; *mean-θ* fixes one θ = the
+posterior mean and scores that.
+
+**Simulation is deterministic, which changes what these mean.** cuBNM
+pre-computes ONE noise array per `SimGroup` — `bnm.cu` sizes it
+`nodes × bw_it × inner_it × n_noise`, with no `n_sims` dimension, and the
+kernel's `noise_idx` is a function of (timestep, inner step, node) only, never
+of the simulation index. Every sim in a batch therefore sees the identical
+noise stream, and `sim_seed` is hardcoded to 42. Consequences:
+
+- Resimulating the same θ gives a bit-identical BOLD and FC. Reruns are
+  reproducible; there is no run-to-run scatter to average away.
+- The expected-FC / per-draw gap (0.38 vs 0.30) is **not** noise cancellation.
+  It is averaging over 10 *different* posterior draws, which yields a smoother
+  posterior-predictive mean FC that correlates better with empirical FC than
+  any single draw does.
+- The per-subject `±` on the per-draw score is entirely posterior spread, with
+  no noise component in it.
+- `fc_corr_meantheta` resims one fixed θ `N_TEST_RESIM` times, so it produces
+  N identical FCs and averages them — a no-op costing N× the sims it needs.
+  The code comment there still describes it as noise-averaging.
+
+Per-subject spread is wide — the 2026-07-03 run ranged from 0.16 to 0.53
+expected-FC across its 20 test subjects.
 
 **Two ablations that did not work.** `G_BOUND_HIGH=6` re-opens the coupling
 bound on the theory that the `(0,3)` cap under-couples; it measured worse, so
