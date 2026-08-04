@@ -107,12 +107,9 @@ Sim length: `T_END=864s` (1200 TR @ TR=0.72s), `T_CUT=30s` → **1158 TR analyze
 
 ### Run
 ```bash
-# REAL run (GPU node) — ~2-3 h end to end:
+# REAL run (GPU node) — ~2-3 h end to end. This is the configuration that
+# produced the best measured result; the defaults are already correct:
 SMOKE=0 python main_HCP.py
-
-# SC-encoder variant: FiLM fusion so SC multiplicatively gates the FC tokens
-# (the default "add" fusion is a droppable offset that SGD zeroes out):
-SMOKE=0 SC_FUSION=film FC_TOKEN_DROPOUT=0.1 python main_HCP.py
 
 # smoke / CPU-safe checks (no training):
 PARAMETER_MODE=basis_regionwise INFERENCE_MODEL=rwweib2 \
@@ -136,6 +133,38 @@ Env overrides:
 | `fc_csv/sim_fc_<sid>.csv`, `emp_fc_<sid>.csv` | the same two matrices as raw CSV |
 | `fc_csv/node_fit_<sid>.csv`, `node_fit_summary.csv` | per-region sim-vs-emp FC-row correlation — which nodes are recovered and which are not |
 | `features_stage1.npz` | cached `(theta_scaled, fc_raw)` simulation pairs; a matching cache key **skips Step 2 entirely** |
+
+### Measured results
+
+Test-set FC correlation, 20 held-out subjects, bootstrap 95% CI. All runs:
+70 train subjects, `N_SIM=1000` (69,988 sims), `N_TEST_RESIM=10`, stage 1.
+
+| Run | Change from default | per-draw mean | expected-FC | mean-θ |
+|---|---|---|---|---|
+| 2026-07-02 | **default — best** | **0.3013** [0.2895, 0.3133] | **0.3827** [0.3547, 0.4098] | **0.3143** |
+| 2026-07-01 | default | 0.2780 [0.2651, 0.2911] | 0.3609 [0.3298, 0.3877] | 0.3019 |
+| 2026-07-03 | `G_BOUND_HIGH=6` | 0.2583 [0.2434, 0.2733] | 0.3586 [0.3229, 0.3942] | 0.2570 |
+| 2026-07-02 | `SC_FUSION=film` | 0.0752 [0.0647, 0.0861] | 0.1672 [0.1429, 0.1913] | 0.0281 |
+
+Read the three columns as three estimators of the same thing, not as three
+results: *per-draw mean* scores each posterior draw's resim separately and
+averages the scores; *expected-FC* averages the resim FC matrices first and
+scores once (denoised, so it reads highest); *mean-θ* fixes one θ = posterior
+mean and noise-averages that. Per-subject spread is wide — the 2026-07-03 run
+ranged from 0.16 to 0.53 expected-FC across its 20 test subjects.
+
+**Two ablations that did not work.** `G_BOUND_HIGH=6` re-opens the coupling
+bound on the theory that the `(0,3)` cap under-couples; it measured worse, so
+`3.0` stays the default. `SC_FUSION=film` measured much worse — the FiLM gate
+is a sound fix for the "SGD zeroes out the additive SC branch" problem in
+principle, but in practice it cost more than the SC signal was worth here.
+Both runs completed cleanly with no errors; these are real results, not
+crashes. `add` remains the default fusion.
+
+Roughly 0.38 expected-FC appears to be this model's ceiling, not the
+inference's: posterior-predictive FC sits close to what the simulator can
+produce at all. Raising it means changing the generative model (operating
+point, FIC, criticality), not the posterior.
 
 > The right-hand panel is **not** an optimizer fit. This is amortized SBI: the
 > posterior is trained once on simulated `(theta, FC)` pairs, then applied to a
@@ -169,7 +198,7 @@ separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
 | `cuBNM/runner_rwweib_2cpl.py` | `build_param_lists`, `run_cubnm_rwweib2_batch`; imports the generated `cubnm.sim.RWWEIB_2CPLSimGroup` |
 | `cuBNM/simulate_rwweib_2cpl.py` | `simulate_gpu_batch` — the only engine adapter shipped |
 | `inference/feature_pipeline.py` | FC PCA-256 whiten |
-| `inference/embedding.py`      | `MultiChannelMatrixEmbedding` — SC-conditioned encoder (`add` / `film` fusion) |
+| `inference/embedding.py`      | `MultiChannelMatrixEmbedding` — SC-conditioned encoder (`add` default; `film` implemented but measured worse) |
 | `inference/snpe.py`           | SNPE-C; MAF |
 | `evaluation/`                 | validation/test metrics, plots (engine-routed) |
 | `evaluation/export_fc_csv.py` | test sim/emp FC + per-region node-fit CSV export |
