@@ -9,8 +9,16 @@ coefficients** — from HCP functional connectivity (FC).
 Entrypoint: **`main_HCP.py`** — HCP human, **RWWEIB_2CPL** model, 360 cortical
 regions.
 
-> **Source of truth = code + config.** This repo is trimmed to only the code
-> and assets used by the full `main_HCP.py` run.
+> **Source of truth = code + config.** This repo carries only the code and
+> assets a full `main_HCP.py` run actually reaches — 60 tracked files. Dead
+> engine adapters, the benchmark harness, standalone experiments, and the
+> superseded whole-brain assets are kept locally but not published (see
+> `.gitignore`, bottom block, for the exact list and how to restore one).
+>
+> Consequence: **only `INFERENCE_MODEL=rwweib2` ships.** `engine_select.py`
+> still routes `wc`/`cubnm`/`rww`/`rwweib`/`rwweibdelay`, but their adapter
+> modules are not in the repo, so selecting one raises `ModuleNotFoundError`
+> in a fresh clone. Same for `RUN_CUBNM_BENCHMARK = True`.
 
 ---
 
@@ -27,8 +35,6 @@ and drop them into `HCP_Data/`.
 | `HCP_Data/basis_cortex.npy` | 9K | **active basis** — `(360,3) = [const, myelin_z, gradient_z]`, cortex-only |
 | `HCP_Data/gradient_subjects_cortex.npy` | 288K | `(100,360)` cortex-only principal FC gradient (built by `extract_gradient_cortex.py`) |
 | `HCP_Data/myelin_subjects.npy` | 300K | `(100,381)` per-subject myelin (T1w/T2w) maps — basis input |
-| `HCP_Data/basis.npy` | 9K | legacy `(381,3)` whole-brain basis (sliced `[:360]`) |
-| `HCP_Data/gradient_subjects.npy` | 300K | legacy `(100,381)` whole-brain gradient |
 
 ### External (NOT committed — get separately)
 | File | Size | Contents |
@@ -159,24 +165,14 @@ separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
 | `engine_select.py`            | route active model (rwweib2 / rwweib / rww / vbi) |
 | `data_loader_hcp.py`          | FC/SC load, 381→360 slice, SC scale, group-avg FC |
 | `extract_gradient_cortex.py`  | build `basis_cortex.npy` — cortex-only principal FC gradient |
-| `cuBNM/rww_eib_2cpl.yaml`     | RWWEIB_2CPL model (2 couplings, `conn_state_vars:[S_E,S_I]`) |
-| `cuBNM/runner_rwweib_2cpl.py` | `build_param_lists`, `RWWEIB_2CPLSimGroup` |
+| `cuBNM/rww_eib_2cpl.yaml`     | RWWEIB_2CPL model spec (2 couplings, `conn_state_vars:[S_E,S_I]`); codegen input |
+| `cuBNM/runner_rwweib_2cpl.py` | `build_param_lists`, `run_cubnm_rwweib2_batch`; imports the generated `cubnm.sim.RWWEIB_2CPLSimGroup` |
+| `cuBNM/simulate_rwweib_2cpl.py` | `simulate_gpu_batch` — the only engine adapter shipped |
 | `inference/feature_pipeline.py` | FC PCA-256 whiten |
 | `inference/embedding.py`      | `MultiChannelMatrixEmbedding` — SC-conditioned encoder (`add` / `film` fusion) |
 | `inference/snpe.py`           | SNPE-C; MAF |
 | `evaluation/`                 | validation/test metrics, plots (engine-routed) |
 | `evaluation/export_fc_csv.py` | test sim/emp FC + per-region node-fit CSV export |
-
-### Standalone (not part of the `main_HCP.py` run)
-| File | Purpose |
-|------|---------|
-| `inference/emulator.py`   | differentiable FC emulator `E: theta→PCA-256` + `AmortizedFitNet Q: empFC→theta`, trained on an FC-space `(1-corr) + λ·rmse` loss. CPU self-test: `python inference/emulator.py` |
-| `train_emulator_fit.py`   | driver for the above; consumes `output_hcp/features_stage1.npz` + `HCP_Data/HCP_FC.mat`, writes `fit_theta_pred.npy` |
-
-`emulator.py` exists because cuBNM is non-differentiable, so FC correlation
-cannot be back-propagated into the inference net directly. Its training corr is
-**emulated** — the honest check is to resim `fit_theta_pred.npy` through the real
-cuBNM engine and recompute FC corr.
 
 ---
 

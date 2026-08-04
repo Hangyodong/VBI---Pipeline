@@ -36,3 +36,34 @@ sbi-logs/
 
 # HCP 런 산출물
 output_hcp/
+
+# ── 로컬 전용: main_HCP.py(INFERENCE_MODEL=rwweib2) 실행에 불필요 ──────────
+# 아래 파일은 디스크에 그대로 남지만 GitHub에는 올리지 않는다.
+# 되살리려면 이 블록에서 해당 줄을 지우고 git add.
+
+# 미사용 엔진 어댑터 (engine_select 라우트는 살아있으나 모듈은 미배포:
+# INFERENCE_MODEL=wc/cubnm/rww/rwweib/rwweibdelay 는 clone 환경에서 ImportError)
+cuBNM/simulate.py
+cuBNM/runner_vbi.py
+cuBNM/simulate_rww.py
+cuBNM/runner_rww.py
+cuBNM/simulate_rwweib.py
+cuBNM/runner_rwweib.py
+cuBNM/simulate_rwweib_delay.py
+cuBNM/runner_rwweib_delay.py
+
+# VBI vs cuBNM 벤치마크 (main_HCP.py RUN_CUBNM_BENCHMARK = False)
+cuBNM/benchmark.py
+cuBNM/fc.py
+cuBNM/runner.py
+
+# Method A 에뮬레이터 (standalone; 파이프라인 미연결)
+inference/emulator.py
+train_emulator_fit.py
+
+# simulation/__init__.py 와 중복인 repo-root 패키지 마커 (임포트 대상 아님)
+/__init__.py
+
+# 구버전 whole-brain(381) 자산 — basis_cortex / gradient_subjects_cortex 로 대체
+HCP_Data/basis.npy
+HCP_Data/gradient_subjects.npy
