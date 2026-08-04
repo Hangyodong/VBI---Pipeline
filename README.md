@@ -16,28 +16,32 @@ regions.
 
 ## Data
 
-The active pipeline reads FC + SC + myelin/gradient maps. Large `.mat` files
+All data lives under **`HCP_Data/`** (`config.DATA_DIR`). Large `.mat` files
 exceed GitHub's 100MB limit and are **not** committed — obtain them separately
-and place them in the repo root.
+and drop them into `HCP_Data/`.
 
 ### In-repo (committed)
 | File | Size | Contents |
 |------|------|----------|
-| `HCP_CABNP381_SC_first100.mat` | 43M | **active SC** — CAB-NP 381-region, first 100 subjects (`SC_DATASET=cabnp381`) |
-| `myelin_subjects.npy` | 300K | per-subject myelin (T1w/T2w) maps — basis input |
-| `gradient_subjects.npy` | 300K | per-subject principal functional-gradient maps — basis input |
-| `basis.npy` | 9K | `(381,3) = [const, myelin, gradient]` basis matrix (sliced `[:360]`) |
-| `Custom_Schaefer200_7net_PD25subcortex*.txt` | 6.5K | parcellation label tables |
+| `HCP_Data/HCP_CABNP381_SC_first100.mat` | 43M | **active SC** — CAB-NP 381-region, first 100 subjects (`SC_DATASET=cabnp381`) |
+| `HCP_Data/basis_cortex.npy` | 9K | **active basis** — `(360,3) = [const, myelin_z, gradient_z]`, cortex-only |
+| `HCP_Data/gradient_subjects_cortex.npy` | 288K | `(100,360)` cortex-only principal FC gradient (built by `extract_gradient_cortex.py`) |
+| `HCP_Data/myelin_subjects.npy` | 300K | `(100,381)` per-subject myelin (T1w/T2w) maps — basis input |
+| `HCP_Data/basis.npy` | 9K | legacy `(381,3)` whole-brain basis (sliced `[:360]`) |
+| `HCP_Data/gradient_subjects.npy` | 300K | legacy `(100,381)` whole-brain gradient |
 
 ### External (NOT committed — get separately)
 | File | Size | Contents |
 |------|------|----------|
-| `HCP_FC.mat` (var `C`) | 1.1G | **active FC** target — per-subject 381-region FC |
-| `HCP_SC.mat` | 224M | full HCP SC (alternate `SC_DATASET`) |
-| `MPTP_FC_115.mat` / `MPTP_SC_115.mat` | | legacy mouse data |
+| `HCP_Data/HCP_FC.mat` (var `C`) | 1.1G | **active FC** target — per-subject 381-region FC. **Required** — nothing runs without it |
+| `HCP_Data/HCP_SC.mat` | 224M | full HCP SC (only for `SC_DATASET=hcp_v73`) |
 
 Cortical-only: 381 → first **360** Glasser regions (21 subcortical dropped).
 SC scaling via `VBI_SC_SCALE` (`main_HCP.py` forces `maxnorm`).
+
+The cortex-only gradient matters: the whole-brain gradient's leading component
+is driven by the 21 subcortical regions that then get sliced away, so
+`basis_cortex.npy` re-derives it on the 360 cortical regions alone.
 
 ---
 
@@ -66,36 +70,73 @@ Decode (`basis_decoder.py`): per param,
 z   = beta · basis.Tᵀ          # (S,360) region map from 3 coeffs
 map = mid + half·tanh(z)        # mid=(lo+hi)/2, half=(hi-lo)/2
 ```
-Basis bounds (`BASIS_BOUNDS`): `g_LRE(0,3) g_FFI(0,3) I_o(...) sigma(0,0.05)`.
-Prior: scaled `BoxUniform[-1,1]^12`; raw coeff `(-2,2)`. `theta=0` → param
+Basis bounds (`BASIS_BOUNDS`):
+`g_LRE(0,3) g_FFI(0,3) I_o(0.30,0.45) sigma(0,0.05)`.
+Prior: scaled `BoxUniform[-1,1]^12`; raw coeff `(-10,10)`. `theta=0` → param
 midpoints. Bounds/coeff-order are load-bearing — see `basis_decoder.py`.
+
+**`I_o` bound is not cosmetic.** The rWW-EI critical operating point (isolated
+node, no FIC) is `I_o≈0.382`. The old `(0,1)` bound put the decoder midpoint at
+0.5, so ~51% of prior-sampled `(sim, region)` entries landed saturated and only
+~3% in the critical band — SNPE trained mostly on degenerate FCs. `(0.30,0.45)`
+centres the midpoint at 0.375. Revert with `IO_BOUND_LO=0 IO_BOUND_HI=1`.
 
 ### Dataflow (one line)
 ```
 theta(12) → decode → {g_LRE,g_FFI,I_o,sigma}(S,360) → RWWEIB_2CPLSimGroup(GPU)
-  → BOLD(T,360) → compute_fc (raw Pearson r) → upper-tri (64,620)
-  → FeaturePipeline PCA-256 whitened → SNPE-C (MAF, nn.Identity embedding)
+  → BOLD(1200 TR,360) → compute_fc (raw Pearson r) → upper-tri (64,620)
+  → FeaturePipeline PCA-256 whitened → SNPE-C (MAF)
 ```
-N_SIM is **per-subject** → real train tensor = N_TRAIN × N_SIM.
+N_SIM is **per-subject** → real train tensor = N_TRAIN × N_SIM = 70 × 1000.
+Sim length: `T_END=864s` (1200 TR @ TR=0.72s), `T_CUT=30s` → **1158 TR analyzed**.
 
 ### ⚠️ Default gotchas (env overrides in `main_HCP.py`)
 - `SMOKE=1` is the **default** → bare `python main_HCP.py` is a **tiny toy**
-  (4/2/1/1 subjects, 64 sims). Real run = **`SMOKE=0`** (100/70/10/20, 2000 sims).
+  (4/2/1/1 subjects, 64 sims). Real run = **`SMOKE=0`** (100/70/10/20, 1000 sims).
+- `SC_CONDITION=1` is now the **default** → posterior is `q(theta | FC, SC)` via
+  `MultiChannelMatrixEmbedding`. `SC_CONDITION=0` restores the FC-only baseline.
 - `GROUP_AVG_FC=0` → **per-subject** FC (not group-averaged).
 - `USE_DELAYS=0` → delays OFF (computed but not fed; ~0 BOLD-FC effect for 5.3× cost).
-- `SC_CONDITION=0`, `GEOMETRY_COUPLING=0` → baseline (both OFF).
+- `GEOMETRY_COUPLING=0` → OFF.
 
 ### Run
 ```bash
-# REAL run (GPU node):
-SMOKE=0 PARAMETER_MODE=basis_regionwise python main_HCP.py
+# REAL run (GPU node) — ~2-3 h end to end:
+SMOKE=0 python main_HCP.py
+
+# SC-encoder variant: FiLM fusion so SC multiplicatively gates the FC tokens
+# (the default "add" fusion is a droppable offset that SGD zeroes out):
+SMOKE=0 SC_FUSION=film FC_TOKEN_DROPOUT=0.1 python main_HCP.py
 
 # smoke / CPU-safe checks (no training):
 PARAMETER_MODE=basis_regionwise INFERENCE_MODEL=rwweib2 \
   python -m pytest test_basis_mode_smoke.py -q
 ```
-Env overrides: `SMOKE, N_SUBJECTS, N_TRAIN, N_VAL, N_TEST, N_SIM, GPU_BATCH,
-PARAMETER_MODE, SC_DATASET, SC_FILE, GROUP_AVG_FC, USE_DELAYS, VBI_SC_SCALE`.
+
+Env overrides:
+
+| Group | Vars |
+|---|---|
+| sizes | `SMOKE, N_SUBJECTS, N_TRAIN, N_VAL, N_TEST, N_SIM, GPU_BATCH` |
+| data | `SC_DATASET, SC_FILE, BASIS_PATH, GROUP_AVG_FC, VBI_SC_SCALE` |
+| model | `PARAMETER_MODE, USE_DELAYS, G_BOUND_HIGH, IO_BOUND_LO, IO_BOUND_HI, COEFF_PRIOR_LO, COEFF_PRIOR_HI` |
+| inference | `SC_CONDITION, SC_FUSION, FC_TOKEN_DROPOUT, FC_PCA_DIM, FC_PCA_WHITEN` |
+| output | `EXPORT_FC_CSV` |
+
+### What a real run writes to `output_hcp/`
+| Artifact | Contents |
+|---|---|
+| `test_fc_comparison_{1..10}.png` | per test subject: observed FC vs **mean of `N_TEST_RESIM` resimulated FCs**, with `corr` / `RMSE` in the title (2 subjects per image) |
+| `fc_csv/sim_fc_<sid>.csv`, `emp_fc_<sid>.csv` | the same two matrices as raw CSV |
+| `fc_csv/node_fit_<sid>.csv`, `node_fit_summary.csv` | per-region sim-vs-emp FC-row correlation — which nodes are recovered and which are not |
+| `features_stage1.npz` | cached `(theta_scaled, fc_raw)` simulation pairs; a matching cache key **skips Step 2 entirely** |
+
+> The right-hand panel is **not** an optimizer fit. This is amortized SBI: the
+> posterior is trained once on simulated `(theta, FC)` pairs, then applied to a
+> held-out subject's real FC in a single forward pass; the panel is a
+> resimulation from those posterior draws. There is no per-subject gradient
+> descent on FC error, and the reported `corr` is model-limited, not
+> inference-limited.
 
 ### cuBNM rebuild (after yaml / kernel changes)
 ```bash
@@ -112,18 +153,33 @@ separate cuBNM fork (`cubnm_build/`), required to build RWWEIB_2CPL.
 
 | File | Purpose |
 |------|---------|
-| `main_HCP.py`                 | HCP pipeline driver; config @101-198, basis dispatch |
+| `main_HCP.py`                 | HCP pipeline driver; config @50-210, basis dispatch |
 | `basis_decoder.py`            | `BasisParamDecoder`, `get_decoder`; myelin/gradient decode |
 | `param_decoder.py`            | `decode_to_param_maps` dispatch |
 | `engine_select.py`            | route active model (rwweib2 / rwweib / rww / vbi) |
 | `data_loader_hcp.py`          | FC/SC load, 381→360 slice, SC scale, group-avg FC |
+| `extract_gradient_cortex.py`  | build `basis_cortex.npy` — cortex-only principal FC gradient |
 | `cuBNM/rww_eib_2cpl.yaml`     | RWWEIB_2CPL model (2 couplings, `conn_state_vars:[S_E,S_I]`) |
 | `cuBNM/runner_rwweib_2cpl.py` | `build_param_lists`, `RWWEIB_2CPLSimGroup` |
 | `inference/feature_pipeline.py` | FC PCA-256 whiten |
-| `inference/snpe.py`           | SNPE-C; `nn.Identity` embedding; MAF |
+| `inference/embedding.py`      | `MultiChannelMatrixEmbedding` — SC-conditioned encoder (`add` / `film` fusion) |
+| `inference/snpe.py`           | SNPE-C; MAF |
 | `evaluation/`                 | validation/test metrics, plots (engine-routed) |
+| `evaluation/export_fc_csv.py` | test sim/emp FC + per-region node-fit CSV export |
+
+### Standalone (not part of the `main_HCP.py` run)
+| File | Purpose |
+|------|---------|
+| `inference/emulator.py`   | differentiable FC emulator `E: theta→PCA-256` + `AmortizedFitNet Q: empFC→theta`, trained on an FC-space `(1-corr) + λ·rmse` loss. CPU self-test: `python inference/emulator.py` |
+| `train_emulator_fit.py`   | driver for the above; consumes `output_hcp/features_stage1.npz` + `HCP_Data/HCP_FC.mat`, writes `fit_theta_pred.npy` |
+
+`emulator.py` exists because cuBNM is non-differentiable, so FC correlation
+cannot be back-propagated into the inference net directly. Its training corr is
+**emulated** — the honest check is to resim `fit_theta_pred.npy` through the real
+cuBNM engine and recompute FC corr.
 
 ---
 
 ## Style
-All modules conform to `pycodestyle --max-line-length=88`.
+Library modules target `pycodestyle --max-line-length=88`. `main_HCP.py` is
+converted from a notebook and does not conform.
