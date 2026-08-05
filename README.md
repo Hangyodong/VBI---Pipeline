@@ -195,12 +195,26 @@ point, FIC, criticality), not the posterior.
 > inference-limited.
 
 ### Docker
+
+A built image already exists — load it and run:
+
+```bash
+docker load -i /scratch/home/wog3597/vbi-hcp-image/vbi-hcp.tar   # 6.3 GB
+docker run --rm --gpus all -e SMOKE=0 \
+  -v "$PWD/HCP_Data:/app/HCP_Data" -v "$PWD/output_hcp:/app/output_hcp" vbi-hcp:latest
+```
+
+`vbi-hcp:latest`, 6.3 GB, three layers: `ubuntu:22.04`, a conda env at
+`/opt/conda`, and this repo at `/app`. Labels carry the exact `vbi.commit` and
+`vbi.cubnm.commit` it was built from. Verified by extracting the layers and
+running a real RWWEIB_2CPL GPU simulation inside the resulting rootfs — 2/2
+sims, BOLD matching a native run.
+
+To rebuild:
+
 ```bash
 ./docker/build.sh                          # ~150 MB context, 30-60 min first build
 CUBNM_SRC=/path/to/cubnm ./docker/build.sh # if the fork is not at ../cubnm_build
-
-docker run --rm --gpus all -e SMOKE=0 \
-  -v "$PWD/HCP_Data:/app/HCP_Data" -v "$PWD/output_hcp:/app/output_hcp" vbi-hcp:latest
 ```
 Two stages: the first compiles the cuBNM fork with nvcc (no GPU needed at build
 time), the second is a CUDA runtime image with the wheel plus the 60 tracked
@@ -213,6 +227,12 @@ uncommitted kernel changes. Data is mounted, never baked in.
 is lazy, and all 50 library modules were verified to import with those three
 names blocked. `cupy` alone would add ~1.5 GB for a Wilson-Cowan path that
 `rwweib2` never takes.
+
+If no Docker daemon is reachable — an HPC account outside the `docker` group,
+where rootless Docker is also blocked because writing `/etc/subuid` needs root
+— `docker/nodaemon/` builds the same image with no container runtime at all:
+the env is built natively and the image is written as tar and JSON by hand.
+That is how the shipped tarball was produced. See `docker/nodaemon/README.md`.
 
 Two caveats worth knowing before you rely on the image for reproduction. The
 RWWEIB_2CPL model exists only in a **local fork of cuBNM that is not published
