@@ -194,6 +194,34 @@ point, FIC, criticality), not the posterior.
 > descent on FC error, and the reported `corr` is model-limited, not
 > inference-limited.
 
+### Docker
+```bash
+./docker/build.sh                          # ~150 MB context, 30-60 min first build
+CUBNM_SRC=/path/to/cubnm ./docker/build.sh # if the fork is not at ../cubnm_build
+
+docker run --rm --gpus all -e SMOKE=0 \
+  -v "$PWD/HCP_Data:/app/HCP_Data" -v "$PWD/output_hcp:/app/output_hcp" vbi-hcp:latest
+```
+Two stages: the first compiles the cuBNM fork with nvcc (no GPU needed at build
+time), the second is a CUDA runtime image with the wheel plus the 60 tracked
+repo files. Expect ~8-10 GB. `build.sh` stages both source trees as
+`git archive` tarballs, so `output_hcp/` never enters the context; it refuses to
+build if the fork's tree is dirty, since `git archive` would silently omit
+uncommitted kernel changes. Data is mounted, never baked in.
+
+`cupy`, `brainspace` and `tvb` are left out of the image — every import of them
+is lazy, and all 50 library modules were verified to import with those three
+names blocked. `cupy` alone would add ~1.5 GB for a Wilson-Cowan path that
+`rwweib2` never takes.
+
+Two caveats worth knowing before you rely on the image for reproduction. The
+RWWEIB_2CPL model exists only in a **local fork of cuBNM that is not published
+anywhere** — not on PyPI, and its two kernel commits are not on the upstream
+remote, so the image cannot be rebuilt without that working copy. And cuBNM's
+own Dockerfile warns that identical builds on different hardware can generate
+different noise, so containerising does not by itself guarantee the numbers in
+the results table reproduce.
+
 ### cuBNM rebuild (after yaml / kernel changes)
 ```bash
 cd /scratch/home/wog3597/cubnm_build

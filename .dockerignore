@@ -1,0 +1,19 @@
+# docker/build.sh stages a git-archive context, so this file only matters if
+# someone runs `docker build .` from the repo root by hand. Without it the
+# context is ~18 GB, almost all of it run artifacts.
+output_hcp/
+output_mouse_mptp/
+logs/
+sbi-logs/
+cache/
+.git/
+__pycache__/
+*.pyc
+*.bak*
+*.ipynb
+*.log
+.docker-ctx/
+
+# Data is mounted at run time, not baked in.
+HCP_Data/
+*.mat

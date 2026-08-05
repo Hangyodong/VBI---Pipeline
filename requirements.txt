@@ -1,27 +1,30 @@
-# Mouse MPTP VBI-SBI pipeline — Python dependencies
-# Tested on Python 3.10, CUDA 12.x, H100 NVL
+# HCP VBI-SBI pipeline (main_HCP.py, RWWEIB_2CPL) — Python dependencies.
+# Versions are those of the environment that produced the recorded results.
+# docker/Dockerfile pins the same set; keep the two in sync.
 #
-# Install with:
 #   pip install -r requirements.txt
 #
-# Then install cupy and vbi separately (see install.sh or the notes below):
-#   pip install cupy-cuda12x
-#   pip install vbi
+# cubnm is NOT listed here, and the version this pipeline needs is not on PyPI:
+# RWWEIB_2CPL comes from a fork carrying multi-coupling kernel changes. Build it
+# from that fork, or use docker/build.sh, which does it for you.
 
 # ---- Core scientific stack ----
-numpy>=1.26,<3.0
-scipy>=1.11
-pandas>=2.0
-matplotlib>=3.7
+numpy==2.3.5
+scipy==1.17.1
+pandas==2.3.3
+matplotlib==3.10.6
+h5py==3.15.1
+tqdm==4.67.1
 
 # ---- ML / SBI ----
-torch>=2.1
-scikit-learn>=1.3
+torch==2.6.0          # +cu124 build, from https://download.pytorch.org/whl/cu124
+scikit-learn==1.7.2
 sbi==0.26.1
 
-# ---- VBI Wilson-Cowan backend ----
-vbi==0.4.3
-
-# ---- GPU array library (uncomment one) ----
-# cupy-cuda12x>=13.0
-# cupy-cuda11x>=13.0
+# ---- Optional ----
+# Every import of these sits inside a function or a try block, and all 50
+# library modules import cleanly with the three of them blocked. Install only
+# if you need what they serve.
+# cupy-cuda12x>=13.0   # Wilson-Cowan engine only; unused by INFERENCE_MODEL=rwweib2
+# brainspace           # extract_gradient_cortex.py only (regenerates basis_cortex.npy)
+# tvb                  # bold.py MixtureOfGammas HRF variant only
