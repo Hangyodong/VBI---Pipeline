@@ -68,3 +68,39 @@ unshare -U -r -m bash -c '
   chroot rootfs env LD_LIBRARY_PATH=/nvlib:/opt/conda/lib /opt/conda/bin/python -c "
 import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
 ```
+
+Check the layers too. Each layer's sha256 — after gunzip, if it is compressed —
+must equal the matching entry in the config's `rootfs.diff_ids`, or `docker load`
+rejects the archive. That catches a truncated transfer or a mis-assembled
+manifest before it reaches the machine that has a daemon.
+
+### Result for the archive built on 2026-08-05
+
+| Check | Outcome |
+|---|---|
+| `sha256sum -c vbi-hcp.tar.sha256` | OK |
+| Layer `diff_id`s (3/3) | match |
+| chroot run | exit 0 |
+| GPU | `torch.cuda.is_available()` True, `NVIDIA A10` |
+| Fork kernel | `from cubnm.sim import RWWEIB_2CPLSimGroup` imports; `RWWEIB_2CPLModel::run_simulations_gpu` present in `core*.so` |
+
+Versions seen inside: torch 2.6.0+cu124, numpy 2.3.5, scipy 1.17.1,
+scikit-learn 1.7.2, sbi 0.26.1, h5py 3.15.1.
+
+Two things to know before running it elsewhere:
+
+- **`cubnm.__version__` reports `0+unknown`.** The Dockerfile sets
+  `SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+fork.<commit>`, but this path does not go
+  through it. Identify the fork by the image label `vbi.cubnm.commit` instead.
+- **`LD_LIBRARY_PATH` is `/opt/conda/lib` only.** The Dockerfile's second stage
+  also prepends the pip `nvidia-*` nvrtc and cublas directories; this image does
+  not. torch uses its own bundled libraries and ran fine, but if an
+  `undefined symbol` shows up, pass them at run time:
+  ```
+  -e LD_LIBRARY_PATH=/opt/conda/lib/python3.13/site-packages/nvidia/cuda_nvrtc/lib:/opt/conda/lib/python3.13/site-packages/nvidia/cublas/lib:/opt/conda/lib
+  ```
+
+`HCP_FC.mat` is not in the image — `/app/HCP_Data` holds only
+`HCP_CABNP381_SC_first100.mat`, `basis_cortex.npy`,
+`gradient_subjects_cortex.npy` and `myelin_subjects.npy`. Mount the real
+`HCP_Data` over it or the FC load fails.
